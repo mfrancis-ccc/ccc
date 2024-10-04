@@ -117,7 +117,6 @@ func (s *Store) ResolvePermissions(ctx context.Context, user accesstypes.User, d
 				}
 				resolvedFieldPermissions[domain][res][field][permission] = false
 			}
-
 		}
 	}
 
@@ -155,6 +154,52 @@ func (s *Store) ResolvePermissions(ctx context.Context, user accesstypes.User, d
 		Resources: resolvedResourcePermissions,
 		Fields:    resolvedFieldPermissions,
 	}, nil
+}
+
+func (s *Store) List() map[accesstypes.Permission][]accesstypes.Resource {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	permissionResources := make(map[accesstypes.Permission][]accesstypes.Resource)
+	for _, store := range s.resourceStore {
+		for resource, permissions := range store {
+			for _, permission := range permissions {
+				permissionResources[permission] = append(permissionResources[permission], resource)
+			}
+		}
+	}
+
+	for _, store := range s.fieldStore {
+		for resource, fields := range store {
+			for field, permissions := range fields {
+				for _, permission := range permissions {
+					permissionResources[permission] = append(permissionResources[permission], resource.ResourceWithField(field))
+				}
+			}
+		}
+	}
+
+	return permissionResources
+}
+
+func (s *Store) Scope(resource accesstypes.Resource) accesstypes.PermissionScope {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for scope, store := range s.resourceStore {
+		if _, ok := store[resource]; ok {
+			return scope
+		}
+	}
+
+	for scope, store := range s.fieldStore {
+		r, f := resource.ResourceAndField()
+		if _, ok := store[r][f]; ok {
+			return scope
+		}
+	}
+
+	return ""
 }
 
 func copyOfPermissionFieldsMap(m map[accesstypes.Permission][]string) map[accesstypes.Permission][]string {
