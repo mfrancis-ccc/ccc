@@ -1,46 +1,65 @@
 package resourcestore
 
 import (
-	"html/template"
 	"os"
+	"text/template"
 
 	"github.com/cccteam/ccc/accesstypes"
 	"github.com/go-playground/errors/v5"
 )
 
 type TSGenerator struct {
-	Permissions []accesstypes.Permission
-	Resources   map[string]accesstypes.Resource
-	Mappings    map[string]map[accesstypes.Permission]bool
+	Permissions         []accesstypes.Permission
+	Resources           []accesstypes.Resource
+	ResourceTags        map[accesstypes.Resource][]accesstypes.Tag
+	ResourcePermissions permissionMap
 }
 
 const tmpl = `// This file is auto-generated. Do not edit manually.
+{{- $permissions := .Permissions }}
+{{- $resources := .Resources}}
+{{- $resourcetags := .ResourceTags }}
+{{- $resourcePerms := .ResourcePermissions}}
 export enum Permissions {
-{{- range .Permissions}}
+{{- range $permissions}}
   {{.}} = '{{.}}',
 {{- end}}
 }
 
 export enum Resources {
-{{- range $enum, $resource := .Resources}}
-  {{$enum}} = '{{$resource}}',
+{{- range $resource := $resources}}
+  {{$resource}} = '{{$resource}}',
 {{- end}}
 }
-
+{{ range $resource, $tags := $resourcetags}}
+export enum {{$resource}} {
+  {{- range $_, $tag:= $tags}}
+  {{$tag}} = '{{$resource.ResourceWithTag $tag}}',
+  {{- end}}
+}
+{{ end}}
+type AllResources = Resources {{- range $resource := .Resources}} | {{$resource}}{{- end}};
 type PermissionResources = Record<Permissions, boolean>;
-type PermissionMappings = Record<Resources, PermissionResources>;
+type PermissionMappings = Record<AllResources, PermissionResources>;
 
 const Mappings: PermissionMappings = {
-{{- range $perm, $resources := .Mappings}}
-  [Resources.{{$perm}}]: {
-  {{- range $resource, $required := $resources}}
-    [Permissions.{{$resource}}]: {{$required}},
-  {{- end}}
+  {{- range $resource := $resources}}
+  [Resources.{{$resource}}]: {
+    {{- range $perm := $permissions}}
+    [Permissions.{{$perm}}]: {{ index $resourcePerms $resource $perm}},
+    {{- end}}
   },
-{{- end}}
+    {{- range $tag := index $resourcetags $resource}}
+  [{{$resource.ResourceWithTag $tag}}]: {
+      {{- range $perm := $permissions}}
+    [Permissions.{{$perm}}]: {{ index $resourcePerms ($resource.ResourceWithTag $tag) $perm}},
+      {{- end}}
+  },
+    {{- end}}
+  {{- end}}
 };
 
-export function requiresPermission(resource: Resources, permission: Permissions): boolean {
+export function requiresPermission(resource: AllResources, permission: Permissions): boolean {
   return Mappings[resource][permission];
 }
 `
@@ -52,22 +71,20 @@ func (s *Store) GenerateTypeScript(dst string) error {
 	}
 	defer f.Close()
 
-	tsFile, err := template.New("").Parse(tmpl)
-	if err != nil {
-		panic(err)
-	}
+	tsFile := template.Must(template.New("").Parse(tmpl))
 
 	if err := tsFile.Execute(f, TSGenerator{
-		Permissions: s.permissions(),
-		Resources:   s.resources(),
-		Mappings:    s.permissionResources(),
+		Permissions:         s.permissions(),
+		Resources:           s.resources(),
+		ResourceTags:        s.tags(),
+		ResourcePermissions: s.resourcePermissions(),
 	}); err != nil {
-		panic(err)
+		return errors.Wrap(err, "template.Template.Execute()")
 	}
 
 	if err := f.Close(); err != nil {
-		return err
+		return errors.Wrap(err, "os.file.Close()")
 	}
 
-	return err
+	return nil
 }

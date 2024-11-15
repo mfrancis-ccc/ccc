@@ -2,7 +2,6 @@
 package resourcestore
 
 import (
-	"fmt"
 	"slices"
 	"sync"
 
@@ -13,6 +12,7 @@ import (
 type (
 	tagStore      map[accesstypes.Resource]map[accesstypes.Tag][]accesstypes.Permission
 	resourceStore map[accesstypes.Resource][]accesstypes.Permission
+	permissionMap map[accesstypes.Resource]map[accesstypes.Permission]bool
 )
 
 type Store struct {
@@ -113,75 +113,81 @@ func (s *Store) permissions() []accesstypes.Permission {
 	return slices.Compact(permissions)
 }
 
-func (s *Store) resources() map[string]accesstypes.Resource {
+func (s *Store) resources() []accesstypes.Resource {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	resources := make(map[string]accesstypes.Resource)
+	resources := []accesstypes.Resource{}
 	for _, stores := range s.resourceStore {
 		for resource := range stores {
-			resources[string(resource)] = resource
+			resources = append(resources, resource)
 		}
 	}
 
-	for _, stores := range s.tagStore {
-		for resource, tags := range stores {
-			for tag := range tags {
-				resources[fmt.Sprintf("%s_%s", resource, tag)] = resource.ResourceWithTag(tag)
-			}
-		}
-	}
+	slices.Sort(resources)
 
-	return resources
+	return slices.Compact(resources)
 }
 
-func (s *Store) permissionResources() map[string]map[accesstypes.Permission]bool {
+func (s *Store) tags() map[accesstypes.Resource][]accesstypes.Tag {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	mapping := map[string]map[accesstypes.Permission]bool{}
-	perms := make(map[accesstypes.Permission]struct{})
-	enums := make(map[string]struct{})
-	for _, store := range s.resourceStore {
-		for resource, permissions := range store {
-			enum := string(resource)
-			enums[enum] = struct{}{}
-			for _, perm := range permissions {
-				perms[perm] = struct{}{}
-				if mapping[enum] == nil {
-					mapping[enum] = make(map[accesstypes.Permission]bool)
-				}
-				mapping[enum][perm] = true
+	resourcetags := make(map[accesstypes.Resource][]accesstypes.Tag)
+
+	for _, tagStore := range s.tagStore {
+		for resource, tags := range tagStore {
+			for tag := range tags {
+				resourcetags[resource] = append(resourcetags[resource], tag)
+				slices.Sort(resourcetags[resource])
 			}
 		}
 	}
+
+	return resourcetags
+}
+
+func (s *Store) resourcePermissions() permissionMap {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	permMap := make(map[accesstypes.Resource]map[accesstypes.Permission]bool)
+	permSet := make(map[accesstypes.Permission]struct{})
+	resources := make(map[accesstypes.Resource]struct{})
+
+	setRequiredPerms := func(res accesstypes.Resource, permissions []accesstypes.Permission) {
+		permMap[res] = make(map[accesstypes.Permission]bool)
+		for _, perm := range permissions {
+			permSet[perm] = struct{}{}
+			permMap[res][perm] = true
+		}
+	}
+
+	for _, store := range s.resourceStore {
+		for resource, permissions := range store {
+			resources[resource] = struct{}{}
+			setRequiredPerms(resource, permissions)
+		}
+	}
+
 	for _, store := range s.tagStore {
 		for resource, tagmap := range store {
 			for tag, permissions := range tagmap {
-				enum := fmt.Sprintf("%s_%s", resource, tag)
-				enums[enum] = struct{}{}
-				for _, perm := range permissions {
-					perms[perm] = struct{}{}
-					if mapping[enum] == nil {
-						mapping[enum] = make(map[accesstypes.Permission]bool)
-					}
-					mapping[enum][perm] = true
-				}
-			}
-		}
-	}
-	for enum := range enums {
-		for perm := range perms {
-			if _, ok := mapping[enum][perm]; !ok {
-				if mapping[enum] == nil {
-					mapping[enum] = make(map[accesstypes.Permission]bool)
-				}
-				mapping[enum][perm] = false
+				resources[resource.ResourceWithTag(tag)] = struct{}{}
+				setRequiredPerms(resource.ResourceWithTag(tag), permissions)
 			}
 		}
 	}
 
-	return mapping
+	for resource := range resources {
+		for perm := range permSet {
+			if _, ok := permMap[resource][perm]; !ok {
+				permMap[resource][perm] = false
+			}
+		}
+	}
+
+	return permMap
 }
 
 func (s *Store) List() map[accesstypes.Permission][]accesstypes.Resource {
