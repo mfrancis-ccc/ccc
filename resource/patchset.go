@@ -1,5 +1,4 @@
-// package patchset provides types to store json patch set mapping to struct fields.
-package patchset
+package resource
 
 import (
 	"github.com/cccteam/ccc/accesstypes"
@@ -8,22 +7,24 @@ import (
 type PatchSet struct {
 	data    map[accesstypes.Field]any
 	dFields []accesstypes.Field
-	pkey    map[accesstypes.Field]any
+	keys    map[accesstypes.Field]any
 	kFields []accesstypes.Field
 }
 
-func New() *PatchSet {
+func NewPatchSet() *PatchSet {
 	return &PatchSet{
 		data: make(map[accesstypes.Field]any),
-		pkey: make(map[accesstypes.Field]any),
+		keys: make(map[accesstypes.Field]any),
 	}
 }
 
-func (p *PatchSet) Set(field accesstypes.Field, value any) {
+func (p *PatchSet) Set(field accesstypes.Field, value any) *PatchSet {
 	if _, found := p.data[field]; !found {
 		p.dFields = append(p.dFields, field)
 	}
 	p.data[field] = value
+
+	return p
 }
 
 func (p *PatchSet) Get(field accesstypes.Field) any {
@@ -31,17 +32,17 @@ func (p *PatchSet) Get(field accesstypes.Field) any {
 }
 
 func (p *PatchSet) SetKey(field accesstypes.Field, value any) {
-	if _, found := p.pkey[field]; !found {
+	if _, found := p.keys[field]; !found {
 		p.kFields = append(p.kFields, field)
 	}
-	p.pkey[field] = value
+	p.keys[field] = value
 }
 
 func (p *PatchSet) Key(field accesstypes.Field) any {
-	return p.pkey[field]
+	return p.keys[field]
 }
 
-func (p *PatchSet) StructFields() []accesstypes.Field {
+func (p *PatchSet) Fields() []accesstypes.Field {
 	return p.dFields
 }
 
@@ -53,18 +54,15 @@ func (p *PatchSet) Data() map[accesstypes.Field]any {
 	return p.data
 }
 
-func (p *PatchSet) PrimaryKey() PrimaryKey {
-	pKey := PrimaryKey{}
+func (p *PatchSet) KeySet() KeySet {
+	var keys KeySet
 	for _, field := range p.kFields {
-		pKey.keyParts = append(pKey.keyParts, KeyPart{
-			Key:   field,
-			Value: p.pkey[field],
-		})
+		keys = keys.Add(field, p.keys[field])
 	}
 
-	return pKey
+	return keys
 }
 
 func (p *PatchSet) HasKey() bool {
-	return len(p.pkey) > 0
+	return len(p.keys) > 0
 }

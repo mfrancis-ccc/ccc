@@ -1,5 +1,5 @@
-// package resourceset is a set of resources that provides a way to map permissions to fields in a struct.
-package resourceset
+// package resource provides a set of types and functions for working with resources.
+package resource
 
 import (
 	"fmt"
@@ -12,6 +12,10 @@ import (
 	"github.com/go-playground/errors/v5"
 )
 
+type Resourcer interface {
+	Resource() accesstypes.Resource
+}
+
 type ResourceSet struct {
 	permissions     []accesstypes.Permission
 	requiredTagPerm accesstypes.TagPermissions
@@ -20,8 +24,14 @@ type ResourceSet struct {
 	immutableFields map[accesstypes.Tag]struct{}
 }
 
-func New(v any, resource accesstypes.Resource, permissions ...accesstypes.Permission) (*ResourceSet, error) {
-	requiredTagPerm, fieldToTag, permissions, immutableFields, err := permissionsFromTags(v, permissions)
+func NewResourceSet[Resource Resourcer, Request any](permissions ...accesstypes.Permission) (*ResourceSet, error) {
+	var req Request
+	var res Resource
+	if !reflect.TypeOf(req).ConvertibleTo(reflect.TypeOf(res)) {
+		return nil, errors.Newf("Request (%T) is not convertible to resource (%T)", req, res)
+	}
+
+	requiredTagPerm, fieldToTag, permissions, immutableFields, err := permissionsFromTags(req, permissions)
 	if err != nil {
 		return nil, errors.Wrap(err, "permissionsFromTags()")
 	}
@@ -30,7 +40,7 @@ func New(v any, resource accesstypes.Resource, permissions ...accesstypes.Permis
 		permissions:     permissions,
 		requiredTagPerm: requiredTagPerm,
 		fieldToTag:      fieldToTag,
-		resource:        resource,
+		resource:        res.Resource(),
 		immutableFields: immutableFields,
 	}, nil
 }
@@ -145,5 +155,30 @@ func permissionsFromTags(v any, perms []accesstypes.Permission) (tags accesstype
 		return nil, nil, nil, nil, errors.Newf("can not have both viewing and mutating permissions in the same struct: found %s and %s", slices.Collect(maps.Keys(viewing)), slices.Collect(maps.Keys(mutating)))
 	}
 
-	return tags, fieldToTag, slices.Collect(maps.Keys(permissionMap)), immutableFields, nil
+	permissions = slices.Collect(maps.Keys(permissionMap))
+	slices.Sort(permissions)
+
+	return tags, fieldToTag, permissions, immutableFields, nil
+}
+
+type cacheEntry struct {
+	index int
+	tag   string
+}
+
+func structTags(t reflect.Type, key string) map[accesstypes.Field]cacheEntry {
+	tagMap := make(map[accesstypes.Field]cacheEntry)
+	for i := range t.NumField() {
+		field := t.Field(i)
+		tag := field.Tag.Get(key)
+
+		list := strings.Split(tag, ",")
+		if len(list) == 0 || list[0] == "" || list[0] == "-" {
+			continue
+		}
+
+		tagMap[accesstypes.Field(field.Name)] = cacheEntry{index: i, tag: list[0]}
+	}
+
+	return tagMap
 }
