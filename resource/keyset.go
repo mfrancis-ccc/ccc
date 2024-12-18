@@ -18,14 +18,6 @@ type KeySet struct {
 	keyParts []KeyPart
 }
 
-func NewKeySet(key accesstypes.Field, value any) KeySet {
-	return KeySet{
-		keyParts: []KeyPart{
-			{Key: key, Value: value},
-		},
-	}
-}
-
 // Add adds an additional column to the primary key creating a composite primary key
 //   - PrimaryKey is immutable.
 //   - Add returns a new PrimaryKey that should be used for all subsequent operations.
@@ -84,4 +76,13 @@ func (p KeySet) Parts() []KeyPart {
 
 func (p KeySet) Len() int {
 	return len(p.keyParts)
+}
+
+func (p KeySet) keys() []accesstypes.Field {
+	var pKeys []accesstypes.Field
+	for _, keypart := range p.keyParts {
+		pKeys = append(pKeys, keypart.Key)
+	}
+
+	return pKeys
 }

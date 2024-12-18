@@ -15,26 +15,7 @@ type (
 	immutableFieldMap map[accesstypes.Resource]map[accesstypes.Tag]struct{}
 )
 
-type Collection struct {
-	mu              sync.RWMutex
-	tagStore        map[accesstypes.PermissionScope]tagStore
-	resourceStore   map[accesstypes.PermissionScope]resourceStore
-	immutableFields map[accesstypes.PermissionScope]immutableFieldMap
-}
-
-func NewCollection() *Collection {
-	if !collectResourcePermissions {
-		return &Collection{}
-	}
-
-	return &Collection{
-		tagStore:        make(map[accesstypes.PermissionScope]tagStore, 2),
-		resourceStore:   make(map[accesstypes.PermissionScope]resourceStore, 2),
-		immutableFields: make(map[accesstypes.PermissionScope]immutableFieldMap, 2),
-	}
-}
-
-func (s *Collection) AddResources(scope accesstypes.PermissionScope, rSet *ResourceSet) error {
+func AddResources[Resource Resourcer, Request any](s *Collection, scope accesstypes.PermissionScope, rSet *ResourceSet[Resource, Request]) error {
 	if !collectResourcePermissions {
 		return nil
 	}
@@ -42,14 +23,14 @@ func (s *Collection) AddResources(scope accesstypes.PermissionScope, rSet *Resou
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	res := rSet.BaseResource()
+	tags := rSet.TagPermissions()
+
 	for _, perm := range rSet.Permissions() {
-		if err := s.addResource(scope, perm, rSet.BaseResource()); err != nil {
+		if err := s.addResource(scope, perm, res); err != nil {
 			return err
 		}
 	}
-
-	res := rSet.BaseResource()
-	tags := rSet.TagPermissions()
 
 	if s.tagStore[scope][res] == nil {
 		if s.tagStore[scope] == nil {
@@ -81,6 +62,25 @@ func (s *Collection) AddResources(scope accesstypes.PermissionScope, rSet *Resou
 	s.immutableFields[scope][res] = rSet.ImmutableFields()
 
 	return nil
+}
+
+type Collection struct {
+	mu              sync.RWMutex
+	tagStore        map[accesstypes.PermissionScope]tagStore
+	resourceStore   map[accesstypes.PermissionScope]resourceStore
+	immutableFields map[accesstypes.PermissionScope]immutableFieldMap
+}
+
+func NewCollection() *Collection {
+	if !collectResourcePermissions {
+		return &Collection{}
+	}
+
+	return &Collection{
+		tagStore:        make(map[accesstypes.PermissionScope]tagStore, 2),
+		resourceStore:   make(map[accesstypes.PermissionScope]resourceStore, 2),
+		immutableFields: make(map[accesstypes.PermissionScope]immutableFieldMap, 2),
+	}
 }
 
 func (s *Collection) AddResource(scope accesstypes.PermissionScope, permission accesstypes.Permission, res accesstypes.Resource) error {

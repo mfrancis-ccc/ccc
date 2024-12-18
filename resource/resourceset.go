@@ -7,6 +7,7 @@ import (
 	reflect "reflect"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/cccteam/ccc/accesstypes"
 	"github.com/go-playground/errors/v5"
@@ -14,42 +15,51 @@ import (
 
 type Resourcer interface {
 	Resource() accesstypes.Resource
+	DefaultConfig() Config
 }
 
-type ResourceSet struct {
+type ResourceSet[Resource Resourcer, Request any] struct {
 	permissions     []accesstypes.Permission
 	requiredTagPerm accesstypes.TagPermissions
 	fieldToTag      map[accesstypes.Field]accesstypes.Tag
-	resource        accesstypes.Resource
 	immutableFields map[accesstypes.Tag]struct{}
+	rMeta           *ResourceMetadata[Resource]
 }
 
-func NewResourceSet[Resource Resourcer, Request any](permissions ...accesstypes.Permission) (*ResourceSet, error) {
-	var req Request
-	var res Resource
-	if !reflect.TypeOf(req).ConvertibleTo(reflect.TypeOf(res)) {
-		return nil, errors.Newf("Request (%T) is not convertible to resource (%T)", req, res)
-	}
-
-	requiredTagPerm, fieldToTag, permissions, immutableFields, err := permissionsFromTags(req, permissions)
+func NewResourceSet[Resource Resourcer, Request any](permissions ...accesstypes.Permission) (*ResourceSet[Resource, Request], error) {
+	requiredTagPerm, fieldToTag, permissions, immutableFields, err := permissionsFromTags(reflect.TypeFor[Request](), permissions)
 	if err != nil {
 		return nil, errors.Wrap(err, "permissionsFromTags()")
 	}
 
-	return &ResourceSet{
+	return &ResourceSet[Resource, Request]{
 		permissions:     permissions,
 		requiredTagPerm: requiredTagPerm,
 		fieldToTag:      fieldToTag,
-		resource:        res.Resource(),
 		immutableFields: immutableFields,
+		rMeta:           NewResourceMetadata[Resource](),
 	}, nil
 }
 
-func (r *ResourceSet) TagPermissions() accesstypes.TagPermissions {
-	return r.requiredTagPerm
+func (r *ResourceSet[Resource, Request]) BaseResource() accesstypes.Resource {
+	var res Resource
+
+	return res.Resource()
 }
 
-func (r *ResourceSet) Permission() accesstypes.Permission {
+func (r *ResourceSet[Resource, Request]) ImmutableFields() map[accesstypes.Tag]struct{} {
+	return r.immutableFields
+}
+
+func (r *ResourceSet[Resource, Request]) ResourceMetadata() *ResourceMetadata[Resource] {
+	return r.rMeta
+}
+
+func (r *ResourceSet[Resource, Request]) PermissionRequired(fieldName accesstypes.Field, perm accesstypes.Permission) bool {
+	return slices.Contains(r.requiredTagPerm[r.fieldToTag[fieldName]], perm)
+}
+
+func (r *ResourceSet[Resource, Request]) Permission() accesstypes.Permission {
 	switch len(r.permissions) {
 	case 0:
 		return accesstypes.NullPermission
@@ -60,33 +70,23 @@ func (r *ResourceSet) Permission() accesstypes.Permission {
 	}
 }
 
-func (r *ResourceSet) Permissions() []accesstypes.Permission {
+func (r *ResourceSet[Resource, Request]) Permissions() []accesstypes.Permission {
 	return r.permissions
 }
 
-func (r *ResourceSet) PermissionRequired(fieldName accesstypes.Field, perm accesstypes.Permission) bool {
-	return slices.Contains(r.requiredTagPerm[r.fieldToTag[fieldName]], perm)
+func (r *ResourceSet[Resource, Request]) Resource(fieldName accesstypes.Field) accesstypes.Resource {
+	var res Resource
+
+	return accesstypes.Resource(fmt.Sprintf("%s.%s", res.Resource(), r.fieldToTag[fieldName]))
 }
 
-func (r *ResourceSet) Resource(fieldName accesstypes.Field) accesstypes.Resource {
-	return accesstypes.Resource(fmt.Sprintf("%s.%s", r.resource, r.fieldToTag[fieldName]))
+func (r *ResourceSet[Resource, Request]) TagPermissions() accesstypes.TagPermissions {
+	return r.requiredTagPerm
 }
 
-func (r *ResourceSet) BaseResource() accesstypes.Resource {
-	return r.resource
-}
-
-func (r *ResourceSet) ImmutableFields() map[accesstypes.Tag]struct{} {
-	return r.immutableFields
-}
-
-func permissionsFromTags(v any, perms []accesstypes.Permission) (tags accesstypes.TagPermissions, fieldToTag map[accesstypes.Field]accesstypes.Tag, permissions []accesstypes.Permission, immutableFields map[accesstypes.Tag]struct{}, err error) {
-	vType := reflect.TypeOf(v)
-	if vType.Kind() == reflect.Ptr {
-		vType = vType.Elem()
-	}
-	if vType.Kind() != reflect.Struct {
-		return nil, nil, nil, nil, errors.Newf("expected a struct, got %s", vType.Kind())
+func permissionsFromTags(t reflect.Type, perms []accesstypes.Permission) (tags accesstypes.TagPermissions, fieldToTag map[accesstypes.Field]accesstypes.Tag, permissions []accesstypes.Permission, immutableFields map[accesstypes.Tag]struct{}, err error) {
+	if t.Kind() != reflect.Struct {
+		return nil, nil, nil, nil, errors.Newf("expected a struct, got %s", t.Kind())
 	}
 
 	tags = make(accesstypes.TagPermissions)
@@ -108,8 +108,8 @@ func permissionsFromTags(v any, perms []accesstypes.Permission) (tags accesstype
 		permissionMap[perm] = struct{}{}
 	}
 
-	for i := range vType.NumField() {
-		field := vType.Field(i)
+	for i := range t.NumField() {
+		field := t.Field(i)
 		jsonTag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 		permTag := field.Tag.Get("perm")
 		perms := strings.Split(permTag, ",")
@@ -161,9 +161,80 @@ func permissionsFromTags(v any, perms []accesstypes.Permission) (tags accesstype
 	return tags, fieldToTag, permissions, immutableFields, nil
 }
 
-type cacheEntry struct {
-	index int
-	tag   string
+type ResourceMetadata[Resource Resourcer] struct {
+	fieldMap            map[accesstypes.Field]cacheEntry
+	dbType              DBType
+	changeTrackingTable string
+	trackChanges        bool
+}
+
+func NewResourceMetadata[Resource Resourcer]() *ResourceMetadata[Resource] {
+	var res Resource
+
+	c := resMetadataCache.get(res)
+
+	return &ResourceMetadata[Resource]{
+		fieldMap:            c.fieldMap,
+		dbType:              c.cfg.DBType,
+		changeTrackingTable: c.cfg.ChangeTrackingTable,
+		trackChanges:        c.cfg.TrackChanges,
+	}
+}
+
+var resMetadataCache = resourceMetadataCache{
+	cache: make(map[reflect.Type]*resourceMetadataCacheEntry),
+}
+
+type resourceMetadataCacheEntry struct {
+	fieldMap map[accesstypes.Field]cacheEntry
+	cfg      Config
+}
+
+type resourceMetadataCache struct {
+	cache map[reflect.Type]*resourceMetadataCacheEntry
+	mu    sync.RWMutex
+}
+
+func (c *resourceMetadataCache) get(res Resourcer) *resourceMetadataCacheEntry {
+	c.mu.RLock()
+
+	t := reflect.TypeOf(res)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	if tagMap, ok := c.cache[t]; ok {
+		defer c.mu.RUnlock()
+
+		return tagMap
+	}
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if tagMap, ok := c.cache[t]; ok {
+		return tagMap
+	}
+
+	if t.Kind() != reflect.Struct {
+		panic(errors.Newf("expected struct, got %s", t.Kind()))
+	}
+
+	var cfg Config
+	fieldMap := structTags(reflect.TypeOf(res), string(cfg.DBType))
+	if t, ok := res.(Configurer); ok {
+		cfg = t.Config()
+	} else {
+		cfg = res.DefaultConfig()
+	}
+
+	c.cache[t] = &resourceMetadataCacheEntry{
+		fieldMap: fieldMap,
+		cfg:      cfg,
+	}
+
+	return c.cache[t]
 }
 
 func structTags(t reflect.Type, key string) map[accesstypes.Field]cacheEntry {
