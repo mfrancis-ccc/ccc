@@ -6,15 +6,15 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/cccteam/ccc/accesstypes"
-	"github.com/ettle/strcase"
 	"github.com/go-playground/errors/v5"
 )
 
@@ -24,13 +24,35 @@ func (c *GenerationClient) RunHandlerGeneration() error {
 		return errors.Wrap(err, "c.structsFromSource()")
 	}
 
-	for _, s := range structs {
-		if err := c.generateHandlers(s); err != nil {
-			return errors.Wrap(err, "c.generateHandlers()")
-		}
+	if err := removeGeneratedFiles(c.handlerDestination, Suffix); err != nil {
+		return errors.Wrap(err, "removeGeneratedFiles()")
 	}
 
-	return nil
+	var (
+		errChan = make(chan error)
+		wg      sync.WaitGroup
+	)
+	// todo(jkyte): There's an issue with imports.Process() causing the generateHandlers() processto run for around 8s for each struct
+	for _, s := range structs {
+		wg.Add(1)
+		go func(structName string) {
+			if err := c.generateHandlers(structName); err != nil {
+				errChan <- err
+			}
+			wg.Done()
+		}(s)
+	}
+
+	var handlerErrors error
+	go func() {
+		for e := range errChan {
+			handlerErrors = errors.Join(handlerErrors, e)
+		}
+	}()
+
+	wg.Wait()
+
+	return handlerErrors
 }
 
 func (c *GenerationClient) generateHandlers(structName string) error {
@@ -39,7 +61,7 @@ func (c *GenerationClient) generateHandlers(structName string) error {
 		return errors.Wrap(err, "generatedType()")
 	}
 
-	handlers := []*generatedHandler{
+	generatedHandlers := []*generatedHandler{
 		{
 			template:    listTemplate,
 			handlerType: List,
@@ -50,69 +72,67 @@ func (c *GenerationClient) generateHandlers(structName string) error {
 		},
 	}
 
-	if !c.tableFieldLookup[structName].IsView {
-		handlers = append(handlers, &generatedHandler{
+	if md, ok := c.tableLookup[c.pluralize(structName)]; ok && !md.IsView {
+		generatedHandlers = append(generatedHandlers, &generatedHandler{
 			template:    patchTemplate,
 			handlerType: Patch,
 		})
 	}
 
-	opts := c.handlerOptions[structName]
-	destinationFile := filepath.Join(c.handlerDestination, fmt.Sprintf("%s.go", strcase.ToSnake(c.pluralizer.Plural(structName))))
-
-	file, err := os.OpenFile(destinationFile, os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		return errors.Wrap(err, "os.OpenFile()")
-	}
-	defer file.Close()
-
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		return errors.Wrap(err, "io.ReadAll()")
-	}
-
-	if len(fileData) == 0 {
-		fileData = []byte("package app\n")
-	}
-
-	for _, h := range handlers {
-		functionName := c.handlerName(structName, h.handlerType)
-
-		skipGeneration := false
-		if optionTypes, ok := opts[h.handlerType]; ok {
-			for _, o := range optionTypes {
-				if o == NoGenerate {
-					skipGeneration = true
-				}
-			}
+	opts := make(map[HandlerType]map[OptionType]any)
+	for handlerType, options := range c.handlerOptions[structName] {
+		opts[handlerType] = make(map[OptionType]any)
+		for _, option := range options {
+			opts[handlerType][option] = struct{}{}
 		}
+	}
 
-		if !skipGeneration {
-			fileData, err = c.replaceHandlerFileContent(fileData, functionName, h, generatedType)
+	var handlerData [][]byte
+	for _, h := range generatedHandlers {
+		if _, skipGeneration := opts[h.handlerType][NoGenerate]; !skipGeneration {
+			data, err := c.handlerContent(h, generatedType)
 			if err != nil {
-				return err
+				return errors.Wrap(err, "replaceHandlerFileContent()")
 			}
+
+			handlerData = append(handlerData, data)
 		}
 	}
 
-	if len(bytes.TrimPrefix(fileData, []byte("package app\n"))) > 0 {
-		if err := c.writeBytesToFile(c.handlerDestination, file, fileData); err != nil {
-			return err
+	if len(handlerData) > 0 {
+		fileName := fmt.Sprintf("%s_generated.go", strings.ToLower(c.caser.ToSnake(c.pluralize(generatedType.Name))))
+		destinationFilePath := filepath.Join(c.handlerDestination, fileName)
+
+		file, err := os.OpenFile(destinationFilePath, os.O_RDWR|os.O_CREATE, 0o644)
+		if err != nil {
+			return errors.Wrap(err, "os.OpenFile()")
 		}
-	} else {
-		if err := file.Close(); err != nil {
-			return errors.Wrap(err, "file.Close()")
+		defer file.Close()
+
+		tmpl, err := template.New("handlers").Funcs(c.templateFuncs()).Parse(handlerHeaderTemplate)
+		if err != nil {
+			return errors.Wrap(err, "template.New().Parse()")
 		}
 
-		if err := os.Remove(destinationFile); err != nil {
-			return errors.Wrap(err, "os.Remove()")
+		buf := bytes.NewBuffer(nil)
+		if err := tmpl.Execute(buf, map[string]any{
+			"Source":   c.resourceSource,
+			"Handlers": string(bytes.Join(handlerData, []byte("\n\n"))),
+		}); err != nil {
+			return errors.Wrap(err, "tmpl.Execute()")
+		}
+
+		if err := c.writeBytesToFile(destinationFilePath, file, buf.Bytes()); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func (c *GenerationClient) replaceHandlerFileContent(existingContent []byte, resultFunctionName string, handler *generatedHandler, generated *generatedType) ([]byte, error) {
+func (c *GenerationClient) handlerContent(handler *generatedHandler, generated *generatedType) ([]byte, error) {
+	log.Printf("Generating handler: %v\n", c.handlerName(generated.Name, handler.handlerType))
+
 	tmpl, err := template.New("handler").Funcs(c.templateFuncs()).Parse(handler.template)
 	if err != nil {
 		return nil, errors.Wrap(err, "template.New().Parse()")
@@ -125,115 +145,90 @@ func (c *GenerationClient) replaceHandlerFileContent(existingContent []byte, res
 		return nil, errors.Wrap(err, "tmpl.Execute()")
 	}
 
-	newContent, err := c.writeHandler(resultFunctionName, existingContent, buf.Bytes())
-	if err != nil {
-		return nil, errors.Wrap(err, "replaceFunction()")
-	}
-
-	return newContent, nil
-}
-
-func (c *GenerationClient) writeHandler(functionName string, existingContent, newFunctionContent []byte) ([]byte, error) {
-	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, "", existingContent, parser.AllErrors)
-	if err != nil {
-		return nil, errors.Wrap(err, "parser.ParseFile()")
-	}
-
-	var start, end token.Pos
-	for _, decl := range node.Decls {
-		if funcDecl, ok := decl.(*ast.FuncDecl); ok {
-			if funcDecl.Name.Name == functionName {
-				start = funcDecl.Pos()
-				end = funcDecl.End()
-
-				break
-			}
-		}
-	}
-
-	if start == token.NoPos || end == token.NoPos {
-		fmt.Printf("Generating handler:  %v\n", functionName)
-
-		return joinBytes(existingContent, []byte("\n\n"), newFunctionContent), nil
-	}
-
-	fmt.Printf("Regenerating handler: %v\n", functionName)
-
-	startOffset := fset.Position(start).Offset
-	endOffset := fset.Position(end).Offset
-
-	return joinBytes(existingContent[:startOffset], newFunctionContent, existingContent[endOffset:]), nil
+	return buf.Bytes(), nil
 }
 
 func (c *GenerationClient) parseTypeForHandlerGeneration(structName string) (*generatedType, error) {
 	tk := token.NewFileSet()
-	parse, err := parser.ParseFile(tk, c.resourceSource, nil, 0)
+	parse, err := parser.ParseFile(tk, c.resourceSource, nil, parser.SkipObjectResolution)
 	if err != nil {
 		return nil, errors.Wrap(err, "parser.ParseFile()")
 	}
 
-	if parse == nil || parse.Scope == nil {
+	if parse == nil {
 		return nil, errors.New("unable to parse file")
 	}
 
 	generatedStruct := &generatedType{IsCompoundTable: true}
-	for _, v := range parse.Scope.Objects {
-		var fields []*typeField
 
-		spec, ok := v.Decl.(*ast.TypeSpec)
-		if !ok || spec.Name == nil || spec.Name.Name != structName {
-			continue
-		}
-		structType, ok := spec.Type.(*ast.StructType)
+declLoop:
+	for _, decl := range parse.Decls {
+		gd, ok := decl.(*ast.GenDecl)
 		if !ok {
 			continue
 		}
-		if structType.Fields == nil {
-			continue
-		}
 
-		for _, f := range structType.Fields.List {
-			if len(f.Names) == 0 {
+		for _, s := range gd.Specs {
+			spec, ok := s.(*ast.TypeSpec)
+			if !ok || spec.Name == nil || spec.Name.Name != structName {
+				continue
+			}
+			st, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			if st.Fields == nil {
 				continue
 			}
 
-			field := &typeField{
-				Name: f.Names[0].Name,
-				Type: fieldType(f.Type, true),
+			table, ok := c.tableLookup[c.pluralize(structName)]
+			if !ok {
+				return nil, errors.Newf("table not found: %s", c.pluralize(structName))
 			}
 
-			if f.Tag != nil {
-				field.Tag = f.Tag.Value[1 : len(f.Tag.Value)-1]
-				structTag := reflect.StructTag(field.Tag)
-				parseTags(field, structTag)
-
-				spannerCol := structTag.Get("spanner")
-				if md, ok := c.tableFieldLookup[c.pluralizer.Plural(structName)].Columns[spannerCol]; ok {
-					field.ConstraintType = string(md.ConstraintType)
-					field.IsPrimaryKey = md.ConstraintType == PrimaryKey
+			var fields []*typeField
+			for _, f := range st.Fields.List {
+				if len(f.Names) == 0 {
+					continue
 				}
+
+				field := &typeField{
+					Name: f.Names[0].Name,
+					Type: fieldType(f.Type, true),
+				}
+
+				if f.Tag != nil {
+					field.Tag = f.Tag.Value[1 : len(f.Tag.Value)-1]
+					structTag := reflect.StructTag(field.Tag)
+					parseTags(field, structTag)
+
+					spannerCol := structTag.Get("spanner")
+					if md, ok := table.Columns[spannerCol]; ok {
+						field.ConstraintType = string(md.ConstraintType)
+						field.IsPrimaryKey = md.ConstraintType == PrimaryKey
+					}
+				}
+
+				if !field.IsPrimaryKey {
+					generatedStruct.IsCompoundTable = false
+				}
+
+				fields = append(fields, field)
 			}
 
-			if !field.IsPrimaryKey {
-				generatedStruct.IsCompoundTable = false
-			}
+			generatedStruct.IsCompoundTable = generatedStruct.IsCompoundTable == (len(fields) > 1)
+			generatedStruct.Name = structName
+			generatedStruct.Fields = fields
 
-			fields = append(fields, field)
+			break declLoop
 		}
-
-		generatedStruct.Name = structName
-		generatedStruct.Fields = fields
-
-		break
 	}
 
 	return generatedStruct, nil
 }
 
 func parseTags(field *typeField, fieldTag reflect.StructTag) {
-	perms := fieldTag.Get("perm")
-	if perms != "" {
+	if perms := fieldTag.Get("perm"); perms != "" {
 		if strings.Contains(perms, string(accesstypes.Read)) {
 			field.ReadPerm = string(accesstypes.Read)
 		}
@@ -255,13 +250,11 @@ func parseTags(field *typeField, fieldTag reflect.StructTag) {
 		}
 	}
 
-	query := fieldTag.Get("query")
-	if query != "" {
+	if query := fieldTag.Get("query"); query != "" {
 		field.QueryTag = fmt.Sprintf("query:%q", query)
 	}
 
-	conditions := fieldTag.Get("conditions")
-	if conditions != "" {
+	if conditions := fieldTag.Get("conditions"); conditions != "" {
 		field.Conditions = strings.Split(conditions, ",")
 	}
 }
@@ -270,11 +263,11 @@ func (c *GenerationClient) handlerName(structName string, handlerType HandlerTyp
 	var functionName string
 	switch handlerType {
 	case List:
-		functionName = c.pluralizer.Plural(structName)
+		functionName = c.pluralize(structName)
 	case Read:
 		functionName = structName
 	case Patch:
-		functionName = "Patch" + c.pluralizer.Plural(structName)
+		functionName = "Patch" + c.pluralize(structName)
 	}
 
 	return functionName
