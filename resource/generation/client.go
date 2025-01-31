@@ -286,6 +286,7 @@ func (c *GenerationClient) templateFuncs() map[string]any {
 
 			return val
 		},
+		"FormatResourceInterfaceTypes": formatResourceInterfaceTypes,
 	}
 
 	return templateFuncs
@@ -384,4 +385,29 @@ func removeGeneratedFileByHeaderComment(directory, file string) error {
 	}
 
 	return nil
+}
+
+func formatResourceInterfaceTypes(types []*generatedType) string {
+	var typeNames [][]string
+	var typeNamesLen int
+	for i, t := range types {
+		typeNamesLen += len(t.Name)
+		if i == 0 || typeNamesLen > 80 {
+			typeNamesLen = len(t.Name)
+			typeNames = append(typeNames, []string{})
+		}
+
+		typeNames[len(typeNames)-1] = append(typeNames[len(typeNames)-1], t.Name)
+	}
+
+	var sb strings.Builder
+	for _, row := range typeNames {
+		sb.WriteString("\n\t")
+		for _, cell := range row {
+			line := fmt.Sprintf("%s | ", cell)
+			sb.WriteString(line)
+		}
+	}
+
+	return strings.TrimSuffix(strings.TrimPrefix(sb.String(), "\n"), " | ")
 }
