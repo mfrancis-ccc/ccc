@@ -56,16 +56,6 @@ const (
 	resourcesTestFileName           = "generated_resources_test.go"
 )
 
-type Config struct {
-	ResourceSource     string
-	HandlerDestination string
-	SpannerDestination string
-	Migrations         string
-	PluralOverrides    map[string]string
-	CaserGoInitialisms map[string]bool
-	IgnoredHandlers    map[string][]HandlerType
-}
-
 type generatedType struct {
 	Name            string
 	IsView          bool
@@ -120,4 +110,23 @@ type generationOption struct {
 type generatedHandler struct {
 	template    string
 	handlerType HandlerType
+}
+
+type generatedResource struct {
+	Name     string
+	Fields   []*generatedResource
+	dataType string
+	Required bool
+}
+
+func (r generatedResource) DataType() string {
+	if r.dataType == "uuid" {
+		return "string"
+	}
+
+	return r.dataType
+}
+
+func (r generatedResource) MetaType() string {
+	return r.dataType
 }

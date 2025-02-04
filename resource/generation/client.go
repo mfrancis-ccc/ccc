@@ -1,3 +1,4 @@
+// package generation provides the ability to generate resource, handler, and typescript permissions and metadata code from a resource file.
 package generation
 
 import (
@@ -16,6 +17,7 @@ import (
 	"sync"
 
 	cloudspanner "cloud.google.com/go/spanner"
+	"github.com/cccteam/ccc/resource"
 	initiator "github.com/cccteam/db-initiator"
 	"github.com/cccteam/spxscan"
 	"github.com/ettle/strcase"
@@ -24,21 +26,27 @@ import (
 	"golang.org/x/tools/imports"
 )
 
-type GenerationClient struct {
-	resourceSource     string
-	spannerDestination string
-	handlerDestination string
-	db                 *cloudspanner.Client
-	caser              *strcase.Caser
-	tableLookup        map[string]*TableMetadata
-	handlerOptions     map[string]map[HandlerType][]OptionType
-	pluralOverrides    map[string]string
-	cleanup            func()
+type Client struct {
+	genHandlers           func() error
+	genTypescriptPerm     func() error
+	genTypescriptMeta     func() error
+	resourceFilePath      string
+	resourceDestination   string
+	handlerDestination    string
+	typescriptDestination string
+	rc                    *resource.Collection
+	db                    *cloudspanner.Client
+	caser                 *strcase.Caser
+	tableLookup           map[string]*TableMetadata
+	handlerOptions        map[string]map[HandlerType][]OptionType
+	pluralOverrides       map[string]string
+	metadataTemplate      []byte
+	cleanup               func()
 
 	muAlign sync.Mutex
 }
 
-func New(ctx context.Context, config *Config) (*GenerationClient, error) {
+func New(ctx context.Context, resourceFilePath, migrationSourceURL string, generatorOptions ...ClientOption) (*Client, error) {
 	spannerContainer, err := initiator.NewSpannerContainer(ctx, "latest")
 	if err != nil {
 		return nil, errors.Wrap(err, "initiator.NewSpannerContainer()")
@@ -59,31 +67,22 @@ func New(ctx context.Context, config *Config) (*GenerationClient, error) {
 		}
 	}
 
-	if config.Migrations != "" {
-		if err := db.MigrateUp(config.Migrations); err != nil {
-			return nil, errors.Wrap(err, "db.MigrateUp()")
-		}
+	if err := db.MigrateUp(migrationSourceURL); err != nil {
+		return nil, errors.Wrap(err, "db.MigrateUp()")
 	}
 
-	handlerOpts := make(map[string]map[HandlerType][]OptionType)
-	for structName, handlerTypes := range config.IgnoredHandlers {
-		for _, handlerType := range handlerTypes {
-			if _, ok := handlerOpts[structName]; !ok {
-				handlerOpts[structName] = make(map[HandlerType][]OptionType)
-			}
-			handlerOpts[structName][handlerType] = append(handlerOpts[structName][handlerType], NoGenerate)
-		}
+	c := &Client{
+		db:                  db.Client,
+		resourceFilePath:    resourceFilePath,
+		resourceDestination: filepath.Dir(resourceFilePath),
+		cleanup:             cleanupFunc,
+		caser:               strcase.NewCaser(false, nil, nil),
 	}
 
-	c := &GenerationClient{
-		resourceSource:     config.ResourceSource,
-		spannerDestination: config.SpannerDestination,
-		handlerDestination: config.HandlerDestination,
-		handlerOptions:     handlerOpts,
-		pluralOverrides:    config.PluralOverrides,
-		db:                 db.Client,
-		cleanup:            cleanupFunc,
-		caser:              strcase.NewCaser(false, config.CaserGoInitialisms, nil),
+	for _, optionFunc := range generatorOptions {
+		if err := optionFunc(c); err != nil {
+			return nil, err
+		}
 	}
 
 	c.tableLookup, err = c.createTableLookup(ctx)
@@ -94,11 +93,34 @@ func New(ctx context.Context, config *Config) (*GenerationClient, error) {
 	return c, nil
 }
 
-func (c *GenerationClient) Close() {
+func (c *Client) Close() {
 	c.cleanup()
 }
 
-func (c *GenerationClient) createTableLookup(ctx context.Context) (map[string]*TableMetadata, error) {
+func (c *Client) RunGeneration() error {
+	if err := c.runResourcesGeneration(); err != nil {
+		return errors.Wrap(err, "c.genResources()")
+	}
+	if c.genHandlers != nil {
+		if err := c.genHandlers(); err != nil {
+			return errors.Wrap(err, "c.genHandlers()")
+		}
+	}
+	if c.genTypescriptMeta != nil {
+		if err := c.genTypescriptMeta(); err != nil {
+			return errors.Wrap(err, "c.genTypescriptMeta()")
+		}
+	}
+	if c.genTypescriptPerm != nil {
+		if err := c.genTypescriptPerm(); err != nil {
+			return errors.Wrap(err, "c.genTypescriptPerm()")
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) createTableLookup(ctx context.Context) (map[string]*TableMetadata, error) {
 	qry := `SELECT DISTINCT
 		c.TABLE_NAME,
 		c.COLUMN_NAME,
@@ -125,7 +147,7 @@ func (c *GenerationClient) createTableLookup(ctx context.Context) (map[string]*T
 	return c.createLookupMapForQuery(ctx, qry)
 }
 
-func (c *GenerationClient) createLookupMapForQuery(ctx context.Context, qry string) (map[string]*TableMetadata, error) {
+func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[string]*TableMetadata, error) {
 	stmt := cloudspanner.Statement{SQL: qry}
 
 	var result []InformationSchemaResult
@@ -166,25 +188,28 @@ func (c *GenerationClient) createLookupMapForQuery(ctx context.Context, qry stri
 	return m, nil
 }
 
-func (c *GenerationClient) writeBytesToFile(destination string, file *os.File, data []byte) error {
-	data, err := format.Source(data)
-	if err != nil {
-		return errors.Wrap(err, "format.Source()")
-	}
+func (c *Client) writeBytesToFile(destination string, file *os.File, data []byte, goFormat bool) error {
+	if goFormat {
+		var err error
+		data, err = format.Source(data)
+		if err != nil {
+			return errors.Wrap(err, "format.Source()")
+		}
 
-	data, err = imports.Process(destination, data, nil)
-	if err != nil {
-		return errors.Wrap(err, "imports.Process()")
-	}
+		data, err = imports.Process(destination, data, nil)
+		if err != nil {
+			return errors.Wrap(err, "imports.Process()")
+		}
 
-	// align package is not concurrent safe
-	c.muAlign.Lock()
-	defer c.muAlign.Unlock()
+		// align package is not concurrent safe
+		c.muAlign.Lock()
+		defer c.muAlign.Unlock()
 
-	align.Init(bytes.NewReader(data))
-	data, err = align.Do()
-	if err != nil {
-		return errors.Wrap(err, "align.Do()")
+		align.Init(bytes.NewReader(data))
+		data, err = align.Do()
+		if err != nil {
+			return errors.Wrap(err, "align.Do()")
+		}
 	}
 
 	if err := file.Truncate(0); err != nil {
@@ -200,9 +225,9 @@ func (c *GenerationClient) writeBytesToFile(destination string, file *os.File, d
 	return nil
 }
 
-func (c *GenerationClient) structsFromSource() ([]string, error) {
+func (c *Client) structsFromSource() ([]string, error) {
 	tk := token.NewFileSet()
-	parse, err := parser.ParseFile(tk, c.resourceSource, nil, 0)
+	parse, err := parser.ParseFile(tk, c.resourceFilePath, nil, 0)
 	if err != nil {
 		return nil, errors.Wrap(err, "parser.ParseFile()")
 	}
@@ -229,11 +254,13 @@ func (c *GenerationClient) structsFromSource() ([]string, error) {
 	return structs, nil
 }
 
-func (c *GenerationClient) templateFuncs() map[string]any {
+func (c *Client) templateFuncs() map[string]any {
 	templateFuncs := map[string]any{
 		"Pluralize": c.pluralize,
 		"GoCamel":   strcase.ToGoCamel,
 		"Camel":     c.caser.ToCamel,
+		"Kebab":     c.caser.ToKebab,
+		"Lower":     strings.ToLower,
 		"PrimaryKeyTypeIsUUID": func(fields []*typeField) bool {
 			for _, f := range fields {
 				if f.IsPrimaryKey {
@@ -292,7 +319,7 @@ func (c *GenerationClient) templateFuncs() map[string]any {
 	return templateFuncs
 }
 
-func (c *GenerationClient) pluralize(value string) string {
+func (c *Client) pluralize(value string) string {
 	if plural, ok := c.pluralOverrides[value]; ok {
 		return plural
 	}
@@ -341,9 +368,10 @@ func removeGeneratedFiles(directory string, method GeneratedFileDeleteMethod) er
 	}
 
 	for _, f := range files {
-		if !strings.HasSuffix(f, ".go") {
+		if !strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, ".ts") {
 			continue
 		}
+
 		switch method {
 		case Suffix:
 			if err := removeGeneratedFileBySuffix(directory, f); err != nil {

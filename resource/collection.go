@@ -143,7 +143,7 @@ func (s *Collection) permissions() []accesstypes.Permission {
 	return slices.Compact(permissions)
 }
 
-func (s *Collection) resources() []accesstypes.Resource {
+func (s *Collection) Resources() []accesstypes.Resource {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -273,4 +273,14 @@ func (s *Collection) Scope(resource accesstypes.Resource) accesstypes.Permission
 	}
 
 	return ""
+}
+
+func (c *Collection) TypescriptData() TypescriptData {
+	return TypescriptData{
+		Permissions:         c.permissions(),
+		Resources:           c.Resources(),
+		ResourceTags:        c.tags(),
+		ResourcePermissions: c.resourcePermissions(),
+		Domains:             c.domains(),
+	}
 }

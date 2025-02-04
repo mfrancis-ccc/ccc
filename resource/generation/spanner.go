@@ -17,8 +17,8 @@ import (
 	"github.com/go-playground/errors/v5"
 )
 
-func (c *GenerationClient) RunSpannerGeneration() error {
-	if err := removeGeneratedFiles(c.spannerDestination, HeaderComment); err != nil {
+func (c *Client) runResourcesGeneration() error {
+	if err := removeGeneratedFiles(c.resourceDestination, HeaderComment); err != nil {
 		return errors.Wrap(err, "removeGeneratedFiles()")
 	}
 
@@ -44,16 +44,16 @@ func (c *GenerationClient) RunSpannerGeneration() error {
 	return nil
 }
 
-func (c *GenerationClient) generateResourceInterfaces(types []*generatedType) error {
+func (c *Client) generateResourceInterfaces(types []*generatedType) error {
 	output, err := c.generateTemplateOutput(resourcesInterfaceTemplate, map[string]any{
-		"Source": c.resourceSource,
+		"Source": c.resourceFilePath,
 		"Types":  types,
 	})
 	if err != nil {
 		return errors.Wrap(err, "generateTemplateOutput()")
 	}
 
-	destinationFile := filepath.Join(c.spannerDestination, resourceInterfaceOutputFilename)
+	destinationFile := filepath.Join(c.resourceDestination, resourceInterfaceOutputFilename)
 
 	file, err := os.Create(destinationFile)
 	if err != nil {
@@ -61,23 +61,23 @@ func (c *GenerationClient) generateResourceInterfaces(types []*generatedType) er
 	}
 	defer file.Close()
 
-	if err := c.writeBytesToFile(destinationFile, file, output); err != nil {
+	if err := c.writeBytesToFile(destinationFile, file, output, true); err != nil {
 		return errors.Wrap(err, "c.writeBytesToFile()")
 	}
 
 	return nil
 }
 
-func (c *GenerationClient) generateResourceTests(types []*generatedType) error {
+func (c *Client) generateResourceTests(types []*generatedType) error {
 	output, err := c.generateTemplateOutput(resourcesTestTemplate, map[string]any{
-		"Source": c.resourceSource,
+		"Source": c.resourceFilePath,
 		"Types":  types,
 	})
 	if err != nil {
 		return errors.Wrap(err, "generateTemplateOutput()")
 	}
 
-	destinationFile := filepath.Join(c.spannerDestination, resourcesTestFileName)
+	destinationFile := filepath.Join(c.resourceDestination, resourcesTestFileName)
 
 	file, err := os.Create(destinationFile)
 	if err != nil {
@@ -85,21 +85,21 @@ func (c *GenerationClient) generateResourceTests(types []*generatedType) error {
 	}
 	defer file.Close()
 
-	if err := c.writeBytesToFile(destinationFile, file, output); err != nil {
+	if err := c.writeBytesToFile(destinationFile, file, output, true); err != nil {
 		return errors.Wrap(err, "c.writeBytesToFile()")
 	}
 
 	return nil
 }
 
-func (c *GenerationClient) generatePatcherTypes(generatedType *generatedType) error {
+func (c *Client) generatePatcherTypes(generatedType *generatedType) error {
 	fileName := fmt.Sprintf("%s.go", strings.ToLower(c.caser.ToSnake(c.pluralize(generatedType.Name))))
-	destinationFilePath := filepath.Join(c.spannerDestination, fileName)
+	destinationFilePath := filepath.Join(c.resourceDestination, fileName)
 
 	log.Printf("Generating spanner file: %v\n", fileName)
 
 	output, err := c.generateTemplateOutput(resourceFileTemplate, map[string]any{
-		"Source":          c.resourceSource,
+		"Source":          c.resourceFilePath,
 		"Name":            generatedType.Name,
 		"IsView":          generatedType.IsView,
 		"Fields":          generatedType.Fields,
@@ -115,16 +115,16 @@ func (c *GenerationClient) generatePatcherTypes(generatedType *generatedType) er
 	}
 	defer file.Close()
 
-	if err := c.writeBytesToFile(destinationFilePath, file, output); err != nil {
+	if err := c.writeBytesToFile(destinationFilePath, file, output, true); err != nil {
 		return errors.Wrap(err, "c.writeBytesToFile()")
 	}
 
 	return nil
 }
 
-func (c *GenerationClient) buildPatcherTypesFromSource() ([]*generatedType, error) {
+func (c *Client) buildPatcherTypesFromSource() ([]*generatedType, error) {
 	tk := token.NewFileSet()
-	parse, err := parser.ParseFile(tk, c.resourceSource, nil, parser.SkipObjectResolution)
+	parse, err := parser.ParseFile(tk, c.resourceFilePath, nil, parser.SkipObjectResolution)
 	if err != nil {
 		return nil, errors.Wrap(err, "parser.ParseFile()")
 	}
@@ -191,7 +191,7 @@ func (c *GenerationClient) buildPatcherTypesFromSource() ([]*generatedType, erro
 	return typeList, nil
 }
 
-func (c *GenerationClient) typeFieldFromAstField(tableMetadata *TableMetadata, f *ast.Field, isCompoundTable *bool) *typeField {
+func (c *Client) typeFieldFromAstField(tableMetadata *TableMetadata, f *ast.Field, isCompoundTable *bool) *typeField {
 	field := &typeField{
 		Name: f.Names[0].Name,
 	}
@@ -221,7 +221,7 @@ func (c *GenerationClient) typeFieldFromAstField(tableMetadata *TableMetadata, f
 	return field
 }
 
-func (c *GenerationClient) generateTemplateOutput(fileTemplate string, data map[string]any) ([]byte, error) {
+func (c *Client) generateTemplateOutput(fileTemplate string, data map[string]any) ([]byte, error) {
 	tmpl, err := template.New(fileTemplate).Funcs(c.templateFuncs()).Parse(fileTemplate)
 	if err != nil {
 		return nil, errors.Wrap(err, "template.Parse()")
