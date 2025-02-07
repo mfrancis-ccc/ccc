@@ -144,7 +144,8 @@ func (c *Client) handlerContent(handler *generatedHandler, generated *generatedT
 }
 
 func (c *Client) parseTypeForHandlerGeneration(structName string) (*generatedType, error) {
-	generatedStruct := &generatedType{IsCompoundTable: true}
+	var generatedStruct generatedType
+	var pkeyCount int
 
 declLoop:
 	for _, decl := range c.resourceTree.Decls {
@@ -158,12 +159,14 @@ declLoop:
 			if !ok || spec.Name == nil || spec.Name.Name != structName {
 				continue
 			}
+
 			st, ok := spec.Type.(*ast.StructType)
 			if !ok {
 				continue
 			}
+
 			if st.Fields == nil {
-				continue
+				return nil, errors.Newf("no fields found for struct (%s)", structName)
 			}
 
 			table, ok := c.tableLookup[c.pluralize(structName)]
@@ -172,9 +175,9 @@ declLoop:
 			}
 
 			var fields []*typeField
-			for _, f := range st.Fields.List {
+			for i, f := range st.Fields.List {
 				if len(f.Names) == 0 {
-					continue
+					return nil, errors.Newf("field name not found for struct (%s) at index (%d)", structName, i)
 				}
 
 				field := &typeField{
@@ -182,28 +185,34 @@ declLoop:
 					Type: fieldType(f.Type, true),
 				}
 
-				if f.Tag != nil {
-					field.Tag = f.Tag.Value[1 : len(f.Tag.Value)-1]
-					structTag := reflect.StructTag(field.Tag)
-					parseTags(field, structTag)
-
-					spannerCol := structTag.Get("spanner")
-					if md, ok := table.Columns[spannerCol]; ok {
-						field.ConstraintType = string(md.ConstraintType)
-						field.IsPrimaryKey = md.ConstraintType == PrimaryKey
-						field.IsIndex = md.IsIndex
-						field.IsUniqueIndex = md.IsUniqueIndex
-					}
+				if f.Tag == nil {
+					return nil, errors.Newf("field tag not found for struct (%s) at index (%d)", structName, i)
 				}
 
-				if !field.IsPrimaryKey {
-					generatedStruct.IsCompoundTable = false
+				fieldTagInfo, err := parseTags(f.Tag.Value)
+				if err != nil {
+					return nil, errors.Wrapf(err, "parseTags(): struct (%s) at index (%d)", structName, i)
+				}
+				field.fieldTagInfo = fieldTagInfo
+
+				md, ok := table.Columns[field.SpannerColumn]
+				if !ok {
+					return nil, errors.Newf("column (%s) not found for table (%s)", field.SpannerColumn, c.pluralize(structName))
+				}
+
+				field.ConstraintTypes = md.ConstraintTypes
+				field.IsPrimaryKey = md.IsPrimaryKey
+				field.IsIndex = md.IsIndex
+				field.IsUniqueIndex = md.IsUniqueIndex
+
+				if field.IsPrimaryKey {
+					pkeyCount++
 				}
 
 				fields = append(fields, field)
 			}
 
-			generatedStruct.IsCompoundTable = generatedStruct.IsCompoundTable == (len(fields) > 1)
+			generatedStruct.HasCompoundPrimaryKey = pkeyCount > 1
 			generatedStruct.Name = structName
 			generatedStruct.Fields = fields
 
@@ -211,10 +220,18 @@ declLoop:
 		}
 	}
 
-	return generatedStruct, nil
+	return &generatedStruct, nil
 }
 
-func parseTags(field *typeField, fieldTag reflect.StructTag) {
+func parseTags(tag string) (fieldTagInfo, error) {
+	var field fieldTagInfo
+	fieldTag := reflect.StructTag(strings.Trim(tag, "`"))
+
+	field.SpannerColumn = fieldTag.Get("spanner")
+	if field.SpannerColumn == "" {
+		return fieldTagInfo{}, errors.Newf("spanner tag not found")
+	}
+
 	if perms := fieldTag.Get("perm"); perms != "" {
 		if strings.Contains(perms, string(accesstypes.Read)) {
 			field.ReadPerm = string(accesstypes.Read)
@@ -244,6 +261,8 @@ func parseTags(field *typeField, fieldTag reflect.StructTag) {
 	if conditions := fieldTag.Get("conditions"); conditions != "" {
 		field.Conditions = strings.Split(conditions, ",")
 	}
+
+	return field, nil
 }
 
 func (c *Client) handlerName(structName string, handlerType HandlerType) string {
