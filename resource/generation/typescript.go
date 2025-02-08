@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"text/template"
@@ -17,24 +18,24 @@ import (
 func (c *Client) runTypescriptPermissionGeneration() error {
 	templateData := c.rc.TypescriptData()
 
-	if err := removeGeneratedFiles(c.typescriptDestination, HeaderComment); err != nil {
-		return errors.Wrap(err, "removeGeneratedFiles()")
+	if c.genTypescriptMeta == nil {
+		if err := removeGeneratedFiles(c.typescriptDestination, HeaderComment); err != nil {
+			return errors.Wrap(err, "removeGeneratedFiles()")
+		}
 	}
 
 	output, err := c.generateTemplateOutput(typescriptPermissionTemplate, map[string]any{
-		"Header":              typescriptTemplateHeader,
 		"Permissions":         templateData.Permissions,
 		"Resources":           templateData.Resources,
 		"ResourceTags":        templateData.ResourceTags,
 		"ResourcePermissions": templateData.ResourcePermissions,
 		"Domains":             templateData.Domains,
-		"Metadata":            c.metadataTemplate,
 	})
 	if err != nil {
 		return errors.Wrap(err, "c.generateTemplateOutput()")
 	}
-	destinationFilePath := filepath.Join(c.typescriptDestination, "resources.ts")
 
+	destinationFilePath := filepath.Join(c.typescriptDestination, "resourcePermissions.ts")
 	file, err := os.Create(destinationFilePath)
 	if err != nil {
 		return errors.Wrap(err, "os.Create()")
@@ -51,10 +52,8 @@ func (c *Client) runTypescriptPermissionGeneration() error {
 }
 
 func (c *Client) runTypescriptMetadataGeneration() error {
-	if c.genTypescriptPerm == nil {
-		if err := removeGeneratedFiles(c.typescriptDestination, HeaderComment); err != nil {
-			return errors.Wrap(err, "removeGeneratedFiles()")
-		}
+	if err := removeGeneratedFiles(c.typescriptDestination, HeaderComment); err != nil {
+		return errors.Wrap(err, "removeGeneratedFiles()")
 	}
 
 	if err := c.generateTypescriptMetadata(); err != nil {
@@ -80,27 +79,14 @@ func (c *Client) generateTypescriptMetadata() error {
 		}
 	}
 
-	var header string
-	if c.genTypescriptPerm == nil {
-		header = typescriptTemplateHeader
-	}
-
 	output, err := c.generateTemplateOutput(typescriptMetadataTemplate, map[string]any{
 		"Resources": genResources,
-		"Header":    header,
 	})
 	if err != nil {
 		return errors.Wrap(err, "generateTemplateOutput()")
 	}
 
-	if c.genTypescriptPerm != nil {
-		c.metadataTemplate = output
-
-		return nil
-	}
-
 	destinationFilePath := filepath.Join(c.typescriptDestination, "resources.ts")
-
 	file, err := os.Create(destinationFilePath)
 	if err != nil {
 		return errors.Wrap(err, "os.Create()")
@@ -111,11 +97,15 @@ func (c *Client) generateTypescriptMetadata() error {
 		return errors.Wrap(err, "c.writeBytesToFile()")
 	}
 
+	log.Printf("Generated Resource Metadata: %s\n", file.Name())
+
 	return nil
 }
 
 func (c *Client) parseStructForTypescriptGeneration(structName string) (*generatedResource, error) {
 	resource := &generatedResource{Name: structName}
+
+	routerResources := c.rc.Resources()
 
 declLoop:
 	for _, decl := range c.resourceTree.Decls {
@@ -126,15 +116,22 @@ declLoop:
 
 		for _, s := range gd.Specs {
 			spec, ok := s.(*ast.TypeSpec)
-			if !ok || spec.Name == nil || spec.Name.Name != structName {
-				continue
-			}
-			st, ok := spec.Type.(*ast.StructType)
 			if !ok {
 				continue
 			}
-			if st.Fields == nil {
+			if spec.Name == nil {
+				return nil, errors.Newf("parseStructForTypescriptGeneration: reflected struct has no identifier %s", structName)
+			}
+			if spec.Name.Name != structName {
 				continue
+			}
+
+			st, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				return nil, errors.Newf("parseStructForTypescriptGeneration: could not reflect structtype for struct `%s`", structName)
+			}
+			if st.Fields == nil {
+				return nil, errors.Newf("parseStructForTypescriptGeneration: reflected structtype %s has no fields", structName)
 			}
 
 			tableMeta, ok := c.tableLookup[c.pluralize(structName)]
@@ -143,17 +140,40 @@ declLoop:
 			}
 
 			var fields []*generatedResource
-			for _, f := range st.Fields.List {
-				if len(f.Names) == 0 {
-					continue
+			for _, astField := range st.Fields.List {
+				if len(astField.Names) == 0 {
+					return nil, errors.Newf("parseStructForTypescriptGeneration: astField has no identifier in struct %s", structName)
+				}
+				var tag string
+				if astField.Tag != nil {
+					tag = astField.Tag.Value
+				}
+				if tag == "" {
+					return nil, errors.Newf("parseStructForTypescriptGeneration: astField.Tag is empty in %s", structName)
 				}
 
-				nullable := tableMeta.Columns[f.Names[0].Name].IsNullable
+				column := reflect.StructTag(strings.Trim(tag, "`")).Get("spanner")
+				if column == "" {
+					return nil, errors.Newf("parseStructForTypescriptGeneration: could not get spanner value from tag %s in struct %s", tag, structName)
+				}
 
-				field := &generatedResource{
-					Name:     f.Names[0].Name,
-					dataType: typescriptType(f.Type),
-					Required: !nullable,
+				field := &generatedResource{Name: column}
+				fieldMeta, ok := tableMeta.Columns[column]
+				if !ok {
+					return nil, errors.Newf("parseStructForTypescriptGeneration: fieldMeta returned no info for column %s in struct %s", column, structName)
+				}
+				dataType, err := typescriptType(astField.Type)
+				if err != nil {
+					return nil, err
+				}
+				field.dataType = dataType
+				field.Required = !fieldMeta.IsNullable
+
+				if fieldMeta.IsForeignKey && slices.Contains(routerResources, accesstypes.Resource(fieldMeta.ReferencedTable)) {
+					field.IsForeignKey = true
+					field.dataType = "enumerated"
+					field.ReferencedResource = fieldMeta.ReferencedTable
+					field.ReferencedColumn = fieldMeta.ReferencedColumn
 				}
 
 				fields = append(fields, field)
@@ -168,35 +188,33 @@ declLoop:
 	return resource, nil
 }
 
-func typescriptType(t ast.Expr) string {
+func typescriptType(t ast.Expr) (string, error) {
 	switch t := t.(type) {
 	case *ast.Ident:
 		switch {
 		case t.Name == "Link", t.Name == "NullLink":
-			return "link"
+			return "link", nil
 		case t.Name == "UUID", t.Name == "NullUUID":
-			return "uuid"
+			return "uuid", nil
 		case t.Name == "bool":
-			return "boolean"
+			return "boolean", nil
 		case t.Name == "string":
-			return "string"
+			return "string", nil
 		case strings.HasPrefix(t.Name, "int"), strings.HasPrefix(t.Name, "uint"),
 			strings.HasPrefix(t.Name, "float"), t.Name == "Decimal", t.Name == "NullDecimal":
-			return "number"
+			return "number", nil
 		case t.Name == "Time", t.Name == "NullTime":
-			return "Date"
+			return "Date", nil
 		default:
-			log.Panicf("type `%s` is not supported (yet)", t.Name)
+			return "", errors.Newf("typescriptType: unhandled type `%s`", t.Name)
 		}
 	case *ast.SelectorExpr:
 		return typescriptType(t.Sel)
 	case *ast.StarExpr:
 		return typescriptType(t.X)
 	default:
-		log.Panicf("type at pos `%d` is not supported (yet)", t.Pos())
+		return "", errors.Newf("typescriptType: unhandled type at field[%d]", t.Pos())
 	}
-
-	return ""
 }
 
 func (c *Client) generateTypescriptTemplate(fileTemplate string, data map[string]any) ([]byte, error) {
