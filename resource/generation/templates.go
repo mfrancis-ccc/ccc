@@ -327,7 +327,7 @@ package app
 		var resp response
 		{{- end }}
 
-		for op, err := range resource.Operations(r, "/{id}") {
+		for op, err := range resource.Operations(r, "/{id}"{{- if ne $PrimaryKeyType "ccc.UUID"  }}, resource.RequireCreatePath(){{- end }}) {
 			if err != nil {
 				return httpio.NewEncoder(w).ClientMessage(ctx, err)
 			}
@@ -463,16 +463,7 @@ const resourceMap: ResourceMap = {
     route: '{{ Kebab (Pluralize $resource.Name) }}',
     fields: [
       {{- range $field := $resource.Fields }}
-      {{- if $field.IsForeignKey }}
-      {
-        fieldName: '{{ Camel $field.Name }}',
-        dataType: '{{ Lower $field.MetaType }}',
-        required: {{ $field.Required }},
-        enumeratedResource: Resources.{{ $field.ReferencedResource }},
-      },
-      {{- else }}
-      { fieldName: '{{ Camel $field.Name }}', dataType: '{{ Lower $field.MetaType }}', required: {{ $field.Required }} },
-      {{- end }}
+      { fieldName: '{{ Camel $field.Name }}', {{- if $field.IsPrimaryKey }} primaryKey: { ordinalPosition: {{ $field.KeyOrdinalPosition }} },{{- end }} displayType: '{{ Lower $field.DisplayType }}', required: {{ $field.Required }}{{ if $field.IsForeignKey }}, enumeratedResource: Resources.{{ $field.ReferencedResource }}{{ end }} },
       {{- end }}
     ],
   },

@@ -90,32 +90,35 @@ type fieldTagInfo struct {
 }
 
 type FieldMetadata struct {
-	ColumnName       string
-	ConstraintTypes  []ConstraintType
-	IsPrimaryKey     bool
-	IsForeignKey     bool
-	SpannerType      string
-	IsNullable       bool
-	IsIndex          bool
-	IsUniqueIndex    bool
-	ReferencedTable  string
-	ReferencedColumn string
+	ColumnName         string
+	ConstraintTypes    []ConstraintType
+	IsPrimaryKey       bool
+	IsForeignKey       bool
+	SpannerType        string
+	IsNullable         bool
+	IsIndex            bool
+	IsUniqueIndex      bool
+	OrdinalPosition    int64
+	KeyOrdinalPosition int64
+	ReferencedTable    string
+	ReferencedColumn   string
 }
 
 type InformationSchemaResult struct {
-	TableName        string  `spanner:"TABLE_NAME"`
-	ColumnName       string  `spanner:"COLUMN_NAME"`
-	ConstraintName   *string `spanner:"CONSTRAINT_NAME"`
-	IsPrimaryKey     bool    `spanner:"IS_PRIMARY_KEY"`
-	IsForeignKey     bool    `spanner:"IS_FOREIGN_KEY"`
-	ReferencedTable  *string `spanner:"REFERENCED_TABLE"`
-	ReferencedColumn *string `spanner:"REFERENCED_COLUMN"`
-	SpannerType      string  `spanner:"SPANNER_TYPE"`
-	IsNullable       bool    `spanner:"IS_NULLABLE"`
-	IsView           bool    `spanner:"IS_VIEW"`
-	IsIndex          bool    `spanner:"IS_INDEX"`
-	IsUniqueIndex    bool    `spanner:"IS_UNIQUE_INDEX"`
-	OrdinalPosition  int64   `spanner:"ORDINAL_POSITION"`
+	TableName          string  `spanner:"TABLE_NAME"`
+	ColumnName         string  `spanner:"COLUMN_NAME"`
+	ConstraintName     *string `spanner:"CONSTRAINT_NAME"`
+	IsPrimaryKey       bool    `spanner:"IS_PRIMARY_KEY"`
+	IsForeignKey       bool    `spanner:"IS_FOREIGN_KEY"`
+	ReferencedTable    *string `spanner:"REFERENCED_TABLE"`
+	ReferencedColumn   *string `spanner:"REFERENCED_COLUMN"`
+	SpannerType        string  `spanner:"SPANNER_TYPE"`
+	IsNullable         bool    `spanner:"IS_NULLABLE"`
+	IsView             bool    `spanner:"IS_VIEW"`
+	IsIndex            bool    `spanner:"IS_INDEX"`
+	IsUniqueIndex      bool    `spanner:"IS_UNIQUE_INDEX"`
+	OrdinalPosition    int64   `spanner:"ORDINAL_POSITION"`
+	KeyOrdinalPosition int64   `spanner:"KEY_ORDINAL_POSITION"`
 }
 
 type TableMetadata struct {
@@ -132,31 +135,62 @@ type generatedHandler struct {
 	template    string
 	handlerType HandlerType
 }
+type tsType int
+
+const (
+	link tsType = iota
+	uuid
+	boolean
+	str
+	number
+	date
+	enumerated
+)
+
+func (t tsType) String() string {
+	switch t {
+	case link:
+		return "Link"
+	case uuid:
+		return "uuid"
+	case boolean:
+		return "boolean"
+	case str:
+		return "string"
+	case number:
+		return "number"
+	case date:
+		return "Date"
+	case enumerated:
+		return "enumerated"
+	}
+
+	return "string"
+}
 
 type generatedResource struct {
 	Name               string
 	Fields             []*generatedResource
-	dataType           string
+	dataType           tsType
 	Required           bool
+	IsPrimaryKey       bool
 	IsForeignKey       bool
+	OrdinalPosition    int64
+	KeyOrdinalPosition int64
 	ReferencedResource string
 	ReferencedColumn   string
 }
 
 func (r generatedResource) DataType() string {
-	if r.dataType == "uuid" || r.dataType == "enumerated" {
-		return "string"
+	if r.dataType == uuid || r.dataType == enumerated {
+		return str.String()
 	}
 
-	if r.dataType == "link" {
-		return "Link"
-	}
-
-	return r.dataType
+	return r.dataType.String()
 }
 
-func (r generatedResource) MetaType() string {
-	return r.dataType
+func (r generatedResource) DisplayType() string {
+	return r.dataType.String()
 }
 
 func generatedFileName(name string) string {
