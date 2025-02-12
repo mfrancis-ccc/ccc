@@ -3,6 +3,9 @@ package resource
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"slices"
+	"strings"
 
 	"github.com/cccteam/ccc/accesstypes"
 	"github.com/cccteam/httpio"
@@ -41,7 +44,7 @@ func NewQueryDecoder[Resource Resourcer, Request any](rSet *ResourceSet[Resource
 }
 
 func (d *QueryDecoder[Resource, Request]) Decode(request *http.Request) (*QuerySet[Resource], error) {
-	fields, err := d.fields(request.Context())
+	fields, err := d.fields(request.Context(), request.URL.Query())
 	if err != nil {
 		return nil, err
 	}
@@ -54,8 +57,19 @@ func (d *QueryDecoder[Resource, Request]) Decode(request *http.Request) (*QueryS
 	return qSet, nil
 }
 
-func (d *QueryDecoder[Resource, Request]) fields(ctx context.Context) ([]accesstypes.Field, error) {
+func (d *QueryDecoder[Resource, Request]) fields(ctx context.Context, queryParams url.Values) ([]accesstypes.Field, error) {
 	domain, user := d.domainFromCtx(ctx), d.userFromCtx(ctx)
+
+	var columnFields []accesstypes.Field
+	if cols := queryParams.Get("columns"); cols != "" {
+		for _, column := range strings.Split(cols, ",") {
+			if field, found := d.fieldMapper.StructFieldName(column); found {
+				columnFields = append(columnFields, field)
+			} else {
+				return nil, httpio.NewBadRequestMessagef("unknown column: %s", column)
+			}
+		}
+	}
 
 	if ok, _, err := d.permissionChecker.RequireResources(ctx, user, domain, d.resourceSet.Permission(), d.resourceSet.BaseResource()); err != nil {
 		return nil, errors.Wrap(err, "accesstypes.Enforcer.RequireResources()")
@@ -65,6 +79,12 @@ func (d *QueryDecoder[Resource, Request]) fields(ctx context.Context) ([]accesst
 
 	fields := make([]accesstypes.Field, 0, d.fieldMapper.Len())
 	for _, field := range d.fieldMapper.Fields() {
+		if len(columnFields) > 0 {
+			if !slices.Contains(columnFields, field) {
+				continue
+			}
+		}
+
 		if !d.resourceSet.PermissionRequired(field, d.resourceSet.Permission()) {
 			fields = append(fields, field)
 		} else {
