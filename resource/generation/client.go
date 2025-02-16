@@ -9,6 +9,7 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -132,43 +133,43 @@ func (c *Client) RunGeneration() error {
 
 func (c *Client) createTableLookup(ctx context.Context) (map[string]*TableMetadata, error) {
 	qry := `WITH DEPENDENCIES AS (
-	SELECT DISTINCT
-		kcu1.TABLE_NAME, 
-		kcu1.COLUMN_NAME, 
-		(SUM(CASE tc.CONSTRAINT_TYPE WHEN 'PRIMARY KEY' THEN 1 ELSE 0 END)) AS IS_PRIMARY_KEY,
-		(SUM(CASE tc.CONSTRAINT_TYPE WHEN 'FOREIGN KEY' THEN 1 ELSE 0 END)) AS IS_FOREIGN_KEY,
-		kcu1.ORDINAL_POSITION AS KEY_ORDINAL_POSITION,
-		(CASE MIN(CASE 
-				WHEN kcu4.TABLE_NAME IS NOT NULL THEN 1
-				WHEN kcu2.TABLE_NAME IS NOT NULL THEN 2
-				ELSE 3
-				END)
-		WHEN 1 THEN MAX(kcu4.TABLE_NAME)
-		WHEN 2 THEN MAX(kcu2.TABLE_NAME)
-		ELSE NULL
-		END) AS REFERENCED_TABLE,
-		(CASE MIN(CASE 
-				WHEN kcu4.COLUMN_NAME IS NOT NULL THEN 1
-				WHEN kcu2.COLUMN_NAME IS NOT NULL THEN 2
-				ELSE 3
-				END)
-		WHEN 1 THEN MAX(kcu4.COLUMN_NAME)
-		WHEN 2 THEN MAX(kcu2.COLUMN_NAME)
-		ELSE NULL
-		END) AS REFERENCED_COLUMN
-	FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1 -- All columns that are Primary Key or Foreign Key
-	JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME -- Identify whether column is Primary Key or Foreign Key
-	LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc ON rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME -- All unique constraints (e.g. PK_Persons) referenced by foreign key constraints (e.g. FK_PersonPhones_PersonId)
-	LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2 ON kcu2.CONSTRAINT_NAME = rc.UNIQUE_CONSTRAINT_NAME -- Table & Column belonging to referenced unique constraint (e.g. Persons, Id)
-		AND kcu2.ORDINAL_POSITION = kcu1.ORDINAL_POSITION
-	LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu3 ON kcu3.TABLE_NAME = kcu2.TABLE_NAME AND kcu3.COLUMN_NAME = kcu2.COLUMN_NAME
-	LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc2 ON rc2.CONSTRAINT_NAME = kcu3.CONSTRAINT_NAME
-	LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu4 ON kcu4.CONSTRAINT_NAME = rc2.UNIQUE_CONSTRAINT_NAME -- Table & Column belonging to 1-jump referenced unique constraint (e.g. DoeInstitutions, Id)
-		AND kcu4.ORDINAL_POSITION = kcu1.ORDINAL_POSITION
-	WHERE
-		kcu1.CONSTRAINT_SCHEMA != 'INFORMATION_SCHEMA'
-		AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'FOREIGN KEY')
-	GROUP BY kcu1.TABLE_NAME, kcu1.COLUMN_NAME, KEY_ORDINAL_POSITION
+		SELECT DISTINCT
+			kcu1.TABLE_NAME, 
+			kcu1.COLUMN_NAME, 
+			(SUM(CASE tc.CONSTRAINT_TYPE WHEN 'PRIMARY KEY' THEN 1 ELSE 0 END)) AS IS_PRIMARY_KEY,
+			(SUM(CASE tc.CONSTRAINT_TYPE WHEN 'FOREIGN KEY' THEN 1 ELSE 0 END)) AS IS_FOREIGN_KEY,
+			kcu1.ORDINAL_POSITION AS KEY_ORDINAL_POSITION,
+			(CASE MIN(CASE 
+					WHEN kcu4.TABLE_NAME IS NOT NULL THEN 1
+					WHEN kcu2.TABLE_NAME IS NOT NULL THEN 2
+					ELSE 3
+					END)
+			WHEN 1 THEN MAX(kcu4.TABLE_NAME)
+			WHEN 2 THEN MAX(kcu2.TABLE_NAME)
+			ELSE NULL
+			END) AS REFERENCED_TABLE,
+			(CASE MIN(CASE 
+					WHEN kcu4.COLUMN_NAME IS NOT NULL THEN 1
+					WHEN kcu2.COLUMN_NAME IS NOT NULL THEN 2
+					ELSE 3
+					END)
+			WHEN 1 THEN MAX(kcu4.COLUMN_NAME)
+			WHEN 2 THEN MAX(kcu2.COLUMN_NAME)
+			ELSE NULL
+			END) AS REFERENCED_COLUMN
+		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1 -- All columns that are Primary Key or Foreign Key
+		JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME -- Identify whether column is Primary Key or Foreign Key
+		LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc ON rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME -- All unique constraints (e.g. PK_Persons) referenced by foreign key constraints (e.g. FK_PersonPhones_PersonId)
+		LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2 ON kcu2.CONSTRAINT_NAME = rc.UNIQUE_CONSTRAINT_NAME -- Table & Column belonging to referenced unique constraint (e.g. Persons, Id)
+			AND kcu2.ORDINAL_POSITION = kcu1.ORDINAL_POSITION
+		LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu3 ON kcu3.TABLE_NAME = kcu2.TABLE_NAME AND kcu3.COLUMN_NAME = kcu2.COLUMN_NAME
+		LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc2 ON rc2.CONSTRAINT_NAME = kcu3.CONSTRAINT_NAME
+		LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu4 ON kcu4.CONSTRAINT_NAME = rc2.UNIQUE_CONSTRAINT_NAME -- Table & Column belonging to 1-jump referenced unique constraint (e.g. DoeInstitutions, Id)
+			AND kcu4.ORDINAL_POSITION = kcu1.ORDINAL_POSITION
+		WHERE
+			kcu1.CONSTRAINT_SCHEMA != 'INFORMATION_SCHEMA'
+			AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'FOREIGN KEY')
+		GROUP BY kcu1.TABLE_NAME, kcu1.COLUMN_NAME, KEY_ORDINAL_POSITION
 	)
 	SELECT DISTINCT
 		c.TABLE_NAME,
@@ -182,6 +183,7 @@ func (c *Client) createTableLookup(ctx context.Context) (map[string]*TableMetada
 		(t.TABLE_NAME IS NULL AND v.TABLE_NAME IS NOT NULL) as IS_VIEW,
 		ic.INDEX_NAME IS NOT NULL AS IS_INDEX,
 		MAX(COALESCE(i.IS_UNIQUE, false)) AS IS_UNIQUE_INDEX,
+		c.GENERATION_EXPRESSION,
 		c.ORDINAL_POSITION,
 		COALESCE(d.KEY_ORDINAL_POSITION, 1) AS KEY_ORDINAL_POSITION,
 	FROM INFORMATION_SCHEMA.COLUMNS c
@@ -196,13 +198,15 @@ func (c *Client) createTableLookup(ctx context.Context) (map[string]*TableMetada
 	WHERE 
 		c.TABLE_SCHEMA != 'INFORMATION_SCHEMA'
 		AND c.COLUMN_NAME NOT LIKE '%_HIDDEN'
-	GROUP BY c.TABLE_NAME, c.COLUMN_NAME, IS_NULLABLE, c.SPANNER_TYPE, d.IS_PRIMARY_KEY, d.IS_FOREIGN_KEY, d.REFERENCED_COLUMN, d.REFERENCED_TABLE, IS_VIEW, IS_INDEX, c.ORDINAL_POSITION, d.KEY_ORDINAL_POSITION
+	GROUP BY c.TABLE_NAME, c.COLUMN_NAME, IS_NULLABLE, c.SPANNER_TYPE, d.IS_PRIMARY_KEY, d.IS_FOREIGN_KEY, d.REFERENCED_COLUMN, d.REFERENCED_TABLE, IS_VIEW, IS_INDEX, c.GENERATION_EXPRESSION, c.ORDINAL_POSITION, d.KEY_ORDINAL_POSITION
 	ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`
 
 	return c.createLookupMapForQuery(ctx, qry)
 }
 
 func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[string]*TableMetadata, error) {
+	log.Println("Creating spanner table lookup...")
+
 	stmt := cloudspanner.Statement{SQL: qry}
 
 	var result []InformationSchemaResult
@@ -212,14 +216,17 @@ func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[s
 
 	m := make(map[string]*TableMetadata)
 	for _, r := range result {
-		tableName := r.TableName
-
-		table, ok := m[tableName]
+		table, ok := m[r.TableName]
 		if !ok {
 			table = &TableMetadata{
-				Columns: make(map[string]FieldMetadata),
-				IsView:  r.IsView,
+				Columns:       make(map[string]FieldMetadata),
+				SearchIndexes: make(map[string][]*expressionField),
+				IsView:        r.IsView,
 			}
+		}
+
+		if r.SpannerType == "TOKENLIST" || strings.HasSuffix(r.ColumnName, "_HIDDEN") {
+			continue
 		}
 
 		column, ok := table.Columns[r.ColumnName]
@@ -267,7 +274,26 @@ func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[s
 		}
 
 		table.Columns[r.ColumnName] = column
-		m[tableName] = table
+		m[r.TableName] = table
+	}
+
+	for _, r := range result {
+		table := m[r.TableName]
+
+		if r.SpannerType == "TOKENLIST" {
+			if r.GenerationExpression == nil {
+				return nil, errors.Newf("generation expression not found for tokenlist column: %s", r.ColumnName)
+			}
+
+			expressionFields, err := searchExpressionFields(*r.GenerationExpression, table.Columns)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, f := range expressionFields {
+				table.SearchIndexes[r.ColumnName] = append(table.SearchIndexes[r.ColumnName], f)
+			}
+		}
 	}
 
 	return m, nil
@@ -389,6 +415,19 @@ func (c *Client) templateFuncs() map[string]any {
 			return val
 		},
 		"FormatResourceInterfaceTypes": formatResourceInterfaceTypes,
+		"FormatTokenTag":               c.formatTokenTags,
+		"ResourceSearchType": func(searchType string) string {
+			switch strings.ToUpper(searchType) {
+			case "SUBSTRING":
+				return "resource.SubString"
+			case "FULLTEXT":
+				return "resource.FullText"
+			case "NGRAMS":
+				return "resource.Ngram"
+			default:
+				return ""
+			}
+		},
 	}
 
 	return templateFuncs
@@ -408,6 +447,30 @@ func (c *Client) pluralize(value string) string {
 	default:
 		return value + "s"
 	}
+}
+
+func (c *Client) formatTokenTags(tableName, fieldName string) string {
+	tokenIndexMap := make(map[string][]string)
+	t, ok := c.tableLookup[tableName]
+	if !ok {
+		panic(fmt.Sprintf("table not found: %s", tableName))
+	}
+
+	for k, v := range t.SearchIndexes {
+		for _, f := range v {
+			if f.fieldName == fieldName {
+				token := string(f.tokenType)
+				tokenIndexMap[token] = append(tokenIndexMap[token], k)
+			}
+		}
+	}
+
+	var tags []string
+	for tt, indexes := range tokenIndexMap {
+		tags = append(tags, fmt.Sprintf(`%s:"%s"`, tt, strings.Join(indexes, ",")))
+	}
+
+	return strings.Join(tags, " ")
 }
 
 func fieldType(expr ast.Expr, isHandlerOutput bool) string {
@@ -530,4 +593,38 @@ func parseResourceFile(resourceFilePath string) (*ast.File, error) {
 	}
 
 	return file, nil
+}
+
+func searchExpressionFields(expression string, cols map[string]FieldMetadata) ([]*expressionField, error) {
+	var flds []*expressionField
+
+	for _, match := range tokenizeRegex.FindAllStringSubmatch(expression, -1) {
+		if len(match) != 3 {
+			return nil, errors.Newf("unexpected number of matches: %d", len(match))
+		}
+
+		var tokenType resource.SearchType
+		switch match[1] {
+		case "TOKENIZE_SUBSTRING":
+			tokenType = resource.SubString
+		case "TOKENIZE_FULLTEXT":
+			tokenType = resource.FullText
+		case "TOKENIZE_NGRAMS":
+			tokenType = resource.Ngram
+		default:
+			continue
+		}
+
+		fieldName := match[2]
+		if _, ok := cols[fieldName]; !ok {
+			return nil, errors.Newf("column parsed from expression was not found in table: %s", fieldName)
+		}
+
+		flds = append(flds, &expressionField{
+			tokenType: tokenType,
+			fieldName: fieldName,
+		})
+	}
+
+	return flds, nil
 }
