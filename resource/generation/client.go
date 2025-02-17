@@ -31,11 +31,15 @@ type Client struct {
 	genHandlers           func() error
 	genTypescriptPerm     func() error
 	genTypescriptMeta     func() error
+	genRoutes             func() error
 	resourceFilePath      string
 	resourceTree          *ast.File
 	resourceDestination   string
 	handlerDestination    string
 	typescriptDestination string
+	routerDestination     string
+	routerPackage         string
+	routePrefix           string
 	rc                    *resource.Collection
 	db                    *cloudspanner.Client
 	caser                 *strcase.Caser
@@ -115,6 +119,11 @@ func (c *Client) RunGeneration() error {
 	if c.genHandlers != nil {
 		if err := c.genHandlers(); err != nil {
 			return errors.Wrap(err, "c.genHandlers()")
+		}
+	}
+	if c.genRoutes != nil {
+		if err := c.genRoutes(); err != nil {
+			return errors.Wrap(err, "c.genRoutes()")
 		}
 	}
 	if c.genTypescriptMeta != nil {
@@ -360,6 +369,7 @@ func (c *Client) templateFuncs() map[string]any {
 		"Pluralize": c.pluralize,
 		"GoCamel":   strcase.ToGoCamel,
 		"Camel":     c.caser.ToCamel,
+		"Pascal":    c.caser.ToPascal,
 		"Kebab":     c.caser.ToKebab,
 		"Lower":     strings.ToLower,
 		"PrimaryKeyTypeIsUUID": func(fields []*typeField) bool {
@@ -426,6 +436,36 @@ func (c *Client) templateFuncs() map[string]any {
 				return "resource.Ngram"
 			default:
 				return ""
+			}
+		},
+		"DetermineTestURL": func(structName string, route generatedRoute) string {
+			if strings.EqualFold(route.Method, "get") && strings.HasSuffix(route.Path, fmt.Sprintf("{%sID}", strcase.ToGoCamel(structName))) {
+				return fmt.Sprintf("/%s/%s/%s",
+					c.routePrefix,
+					c.caser.ToKebab(c.pluralize(structName)),
+					strcase.ToGoCamel(fmt.Sprintf("test%sID", c.caser.ToPascal(structName))),
+				)
+			}
+
+			return route.Path
+		},
+		"DetermineParameters": func(structName string, route generatedRoute) string {
+			if strings.EqualFold(route.Method, "get") && strings.HasSuffix(route.Path, fmt.Sprintf("{%sID}", strcase.ToGoCamel(structName))) {
+				return fmt.Sprintf(`map[string]string{"%s": "%s"}`, strcase.ToGoCamel(structName+"ID"), strcase.ToGoCamel(fmt.Sprintf("test%sID", c.caser.ToPascal(structName))))
+			}
+
+			return "map[string]string{}"
+		},
+		"MethodToHttpConst": func(method string) string {
+			switch method {
+			case "GET":
+				return "http.MethodGet"
+			case "POST":
+				return "http.MethodPost"
+			case "PATCH":
+				return "http.MethodPatch"
+			default:
+				panic(fmt.Sprintf("MethodToHttpConst: unknown method: %s", method))
 			}
 		},
 	}

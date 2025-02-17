@@ -40,6 +40,17 @@ const (
 	Patch HandlerType = "patch"
 )
 
+func (h HandlerType) Method() string {
+	switch h {
+	case Read, List:
+		return "GET"
+	case Patch:
+		return "PATCH"
+	default:
+		panic(fmt.Sprintf("Method(): unknown handler type: %s", h))
+	}
+}
+
 type OptionType string
 
 const (
@@ -67,6 +78,8 @@ const (
 	querySetOutputFilename      = "types.go"
 	resourceInterfaceOutputName = "resources_iface"
 	resourcesTestFileName       = "resource_types_test.go"
+	routesName                  = "routes"
+	routerTestName              = "routes_test"
 )
 
 type generatedType struct {
@@ -150,6 +163,13 @@ type generatedHandler struct {
 	template    string
 	handlerType HandlerType
 }
+
+type generatedRoute struct {
+	Method      string
+	Path        string
+	HandlerFunc string
+}
+
 type tsType int
 
 const (
