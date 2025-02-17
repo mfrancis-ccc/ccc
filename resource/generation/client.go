@@ -7,17 +7,15 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
-	"go/parser"
-	"go/token"
 	"log"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
 	cloudspanner "cloud.google.com/go/spanner"
+	"github.com/cccteam/ccc/accesstypes"
 	"github.com/cccteam/ccc/resource"
 	initiator "github.com/cccteam/db-initiator"
 	"github.com/cccteam/spxscan"
@@ -33,6 +31,7 @@ type Client struct {
 	genTypescriptMeta     func() error
 	genRoutes             func() error
 	resourceFilePath      string
+	resources             []*ResourceInfo
 	resourceTree          *ast.File
 	resourceDestination   string
 	handlerDestination    string
@@ -43,16 +42,16 @@ type Client struct {
 	rc                    *resource.Collection
 	db                    *cloudspanner.Client
 	caser                 *strcase.Caser
-	structNames           []string
 	tableLookup           map[string]*TableMetadata
 	handlerOptions        map[string]map[HandlerType][]OptionType
 	pluralOverrides       map[string]string
+	typescriptOverrides   map[string]string
 	cleanup               func()
 
 	muAlign sync.Mutex
 }
 
-func New(ctx context.Context, resourceFilePath, migrationSourceURL string, generatorOptions ...ClientOption) (*Client, error) {
+func New(ctx context.Context, resourcePackageDir, migrationSourceURL string, generatorOptions ...ClientOption) (*Client, error) {
 	spannerContainer, err := initiator.NewSpannerContainer(ctx, "latest")
 	if err != nil {
 		return nil, errors.Wrap(err, "initiator.NewSpannerContainer()")
@@ -77,21 +76,11 @@ func New(ctx context.Context, resourceFilePath, migrationSourceURL string, gener
 		return nil, errors.Wrap(err, "db.MigrateUp()")
 	}
 
-	resourceTree, err := parseResourceFile(resourceFilePath)
-	if err != nil {
-		return nil, err
-	}
-
-	structs := structsFromSource(resourceTree)
-
 	c := &Client{
 		db:                  db.Client,
-		resourceFilePath:    resourceFilePath,
-		resourceTree:        resourceTree,
-		resourceDestination: filepath.Dir(resourceFilePath),
+		resourceDestination: resourcePackageDir,
 		cleanup:             cleanupFunc,
 		caser:               strcase.NewCaser(false, nil, nil),
-		structNames:         structs,
 	}
 
 	for _, optionFunc := range generatorOptions {
@@ -103,6 +92,23 @@ func New(ctx context.Context, resourceFilePath, migrationSourceURL string, gener
 	c.tableLookup, err = c.createTableLookup(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "c.createTableLookup()")
+	}
+
+	err = removeGeneratedFiles(resourcePackageDir, Prefix)
+	if err != nil {
+		return nil, errors.Wrap(err, "removeGeneratedFilesInNewClient()")
+	}
+
+	pkg, err := loadPackage(resourcePackageDir)
+	if err != nil {
+		return nil, err
+	}
+
+	c.resourceFilePath = filepath.Join(resourcePackageDir, filepath.Base(pkg.GoFiles[0]))
+
+	c.resources, err = c.extractResourceTypes(pkg.Types)
+	if err != nil {
+		return nil, err
 	}
 
 	return c, nil
@@ -228,19 +234,19 @@ func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[s
 		table, ok := m[r.TableName]
 		if !ok {
 			table = &TableMetadata{
-				Columns:       make(map[string]FieldMetadata),
+				Columns:       make(map[string]ColumnMeta),
 				SearchIndexes: make(map[string][]*expressionField),
 				IsView:        r.IsView,
 			}
 		}
 
-		if r.SpannerType == "TOKENLIST" || strings.HasSuffix(r.ColumnName, "_HIDDEN") {
+		if r.SpannerType == "TOKENLIST" {
 			continue
 		}
 
 		column, ok := table.Columns[r.ColumnName]
 		if !ok {
-			column = FieldMetadata{
+			column = ColumnMeta{
 				ColumnName:         r.ColumnName,
 				SpannerType:        r.SpannerType,
 				OrdinalPosition:    r.OrdinalPosition - 1, // SQL is 1-indexed. For consistency with JavaScript & Go we translate to 0-indexed
@@ -249,6 +255,7 @@ func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[s
 		}
 
 		if r.IsPrimaryKey {
+			table.PkCount++
 			column.IsPrimaryKey = true
 			if !slices.Contains(column.ConstraintTypes, PrimaryKey) {
 				column.ConstraintTypes = append(column.ConstraintTypes, PrimaryKey)
@@ -287,21 +294,19 @@ func (c *Client) createLookupMapForQuery(ctx context.Context, qry string) (map[s
 	}
 
 	for _, r := range result {
-		table := m[r.TableName]
-
 		if r.SpannerType == "TOKENLIST" {
+			table := m[r.TableName]
+
 			if r.GenerationExpression == nil {
-				return nil, errors.Newf("generation expression not found for tokenlist column: %s", r.ColumnName)
+				return nil, errors.Newf("generation expression not found for tokenlist column=`%s` table=`%s`", r.ColumnName, r.TableName)
 			}
 
 			expressionFields, err := searchExpressionFields(*r.GenerationExpression, table.Columns)
 			if err != nil {
-				return nil, err
+				return nil, errors.Wrapf(err, "searchExpressionFields table=`%s`", r.TableName)
 			}
 
-			for _, f := range expressionFields {
-				table.SearchIndexes[r.ColumnName] = append(table.SearchIndexes[r.ColumnName], f)
-			}
+			table.SearchIndexes[r.ColumnName] = append(table.SearchIndexes[r.ColumnName], expressionFields...)
 		}
 	}
 
@@ -345,25 +350,6 @@ func (c *Client) writeBytesToFile(destination string, file *os.File, data []byte
 	return nil
 }
 
-func structsFromSource(resourceTree *ast.File) []string {
-	structs := make([]string, 0)
-	for k, v := range resourceTree.Scope.Objects {
-		spec, ok := v.Decl.(*ast.TypeSpec)
-		if !ok {
-			continue
-		}
-		if _, ok := spec.Type.(*ast.StructType); ok {
-			structs = append(structs, k)
-		}
-	}
-
-	sort.Slice(structs, func(i, j int) bool {
-		return structs[i] < structs[j]
-	})
-
-	return structs
-}
-
 func (c *Client) templateFuncs() map[string]any {
 	templateFuncs := map[string]any{
 		"Pluralize": c.pluralize,
@@ -372,10 +358,10 @@ func (c *Client) templateFuncs() map[string]any {
 		"Pascal":    c.caser.ToPascal,
 		"Kebab":     c.caser.ToKebab,
 		"Lower":     strings.ToLower,
-		"PrimaryKeyTypeIsUUID": func(fields []*typeField) bool {
+		"PrimaryKeyTypeIsUUID": func(fields []*FieldInfo) bool {
 			for _, f := range fields {
 				if f.IsPrimaryKey {
-					return f.Type == "ccc.UUID"
+					return f.GoType == "ccc.UUID"
 				}
 			}
 
@@ -388,10 +374,10 @@ func (c *Client) templateFuncs() map[string]any {
 
 			return ` perm:"` + s + `"`
 		},
-		"PrimaryKeyType": func(fields []*typeField) string {
+		"PrimaryKeyType": func(fields []*FieldInfo) string {
 			for _, f := range fields {
 				if f.IsPrimaryKey {
-					return f.Type
+					return f.GoType
 				}
 			}
 
@@ -403,26 +389,6 @@ func (c *Client) templateFuncs() map[string]any {
 			}
 
 			return ""
-		},
-		"DetermineJSONTag": func(field *typeField, isPatch bool) string {
-			if isPatch {
-				if field.IsPrimaryKey {
-					return "-"
-				}
-
-				for _, c := range field.Conditions {
-					if c == "immutable" {
-						return "-"
-					}
-				}
-			}
-
-			val := c.caser.ToCamel(field.Name)
-			if !field.IsPrimaryKey && !isPatch {
-				val += ",omitempty"
-			}
-
-			return val
 		},
 		"FormatResourceInterfaceTypes": formatResourceInterfaceTypes,
 		"FormatTokenTag":               c.formatTokenTags,
@@ -451,7 +417,7 @@ func (c *Client) templateFuncs() map[string]any {
 		},
 		"DetermineParameters": func(structName string, route generatedRoute) string {
 			if strings.EqualFold(route.Method, "get") && strings.HasSuffix(route.Path, fmt.Sprintf("{%sID}", strcase.ToGoCamel(structName))) {
-				return fmt.Sprintf(`map[string]string{"%s": "%s"}`, strcase.ToGoCamel(structName+"ID"), strcase.ToGoCamel(fmt.Sprintf("test%sID", c.caser.ToPascal(structName))))
+				return fmt.Sprintf(`map[string]string{%q: %q}`, strcase.ToGoCamel(structName+"ID"), strcase.ToGoCamel(fmt.Sprintf("test%sID", c.caser.ToPascal(structName))))
 			}
 
 			return "map[string]string{}"
@@ -507,30 +473,10 @@ func (c *Client) formatTokenTags(tableName, fieldName string) string {
 
 	var tags []string
 	for tt, indexes := range tokenIndexMap {
-		tags = append(tags, fmt.Sprintf(`%s:"%s"`, tt, strings.Join(indexes, ",")))
+		tags = append(tags, fmt.Sprintf(`%s:%q`, tt, strings.Join(indexes, ",")))
 	}
 
 	return strings.Join(tags, " ")
-}
-
-func fieldType(expr ast.Expr, isHandlerOutput bool) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		switch {
-		case slices.Contains(baseTypes, t.Name) || !isHandlerOutput:
-			return t.Name
-		default:
-			return fmt.Sprintf("resources.%s", t.Name)
-		}
-	case *ast.SelectorExpr:
-		return fmt.Sprintf("%s.%s", t.X, t.Sel.Name)
-	case *ast.StarExpr:
-		return "*" + fieldType(t.X, isHandlerOutput)
-	case *ast.ArrayType:
-		return "[]" + fieldType(t.Elt, isHandlerOutput)
-	default:
-		panic(fmt.Sprintf("unknown type: %T", t))
-	}
 }
 
 func removeGeneratedFiles(directory string, method GeneratedFileDeleteMethod) error {
@@ -597,21 +543,21 @@ func removeGeneratedFileByHeaderComment(directory, file string) error {
 	return nil
 }
 
-func formatResourceInterfaceTypes(types []*generatedType) string {
-	var typeNames [][]string
-	var typeNamesLen int
-	for i, t := range types {
-		typeNamesLen += len(t.Name)
-		if i == 0 || typeNamesLen > 80 {
-			typeNamesLen = len(t.Name)
-			typeNames = append(typeNames, []string{})
+func formatResourceInterfaceTypes(resources []*ResourceInfo) string {
+	var resourceNames [][]string
+	var resourceNamesLen int
+	for i, t := range resources {
+		resourceNamesLen += len(t.Name)
+		if i == 0 || resourceNamesLen > 80 {
+			resourceNamesLen = len(t.Name)
+			resourceNames = append(resourceNames, []string{})
 		}
 
-		typeNames[len(typeNames)-1] = append(typeNames[len(typeNames)-1], t.Name)
+		resourceNames[len(resourceNames)-1] = append(resourceNames[len(resourceNames)-1], t.Name)
 	}
 
 	var sb strings.Builder
-	for _, row := range typeNames {
+	for _, row := range resourceNames {
 		sb.WriteString("\n\t")
 		for _, cell := range row {
 			line := fmt.Sprintf("%s | ", cell)
@@ -622,25 +568,12 @@ func formatResourceInterfaceTypes(types []*generatedType) string {
 	return strings.TrimSuffix(strings.TrimPrefix(sb.String(), "\n"), " | ")
 }
 
-func parseResourceFile(resourceFilePath string) (*ast.File, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, resourceFilePath, nil, 0)
-	if err != nil {
-		return nil, errors.Wrap(err, "parser.ParseFile()")
-	}
-	if file == nil {
-		return nil, errors.Newf("unable to parse `%s`", resourceFilePath)
-	}
-
-	return file, nil
-}
-
-func searchExpressionFields(expression string, cols map[string]FieldMetadata) ([]*expressionField, error) {
+func searchExpressionFields(expression string, cols map[string]ColumnMeta) ([]*expressionField, error) {
 	var flds []*expressionField
 
 	for _, match := range tokenizeRegex.FindAllStringSubmatch(expression, -1) {
 		if len(match) != 3 {
-			return nil, errors.Newf("unexpected number of matches: %d", len(match))
+			return nil, errors.Newf("expression `%s` has unexpected number of matches: `%d` (expected 3)", expression, len(match))
 		}
 
 		var tokenType resource.SearchType
@@ -656,15 +589,19 @@ func searchExpressionFields(expression string, cols map[string]FieldMetadata) ([
 		}
 
 		fieldName := match[2]
-		if _, ok := cols[fieldName]; !ok {
-			return nil, errors.Newf("column parsed from expression was not found in table: %s", fieldName)
+		if _, ok := cols[fieldName]; !ok { // sanity check that the field name is a real column. just in case the regex leaks something improper
+			return nil, errors.Newf("column `%s` from expression `%s` was not found in table (is the tokenizeRegex working?)", fieldName, match[0])
 		}
 
 		flds = append(flds, &expressionField{
 			tokenType: tokenType,
-			fieldName: fieldName,
+			fieldName: match[2],
 		})
 	}
 
 	return flds, nil
+}
+
+func (c *Client) isResourceRegisteredInRouter(resourceName string, routerResources []accesstypes.Resource) bool {
+	return slices.Contains(routerResources, accesstypes.Resource(c.pluralize(resourceName)))
 }

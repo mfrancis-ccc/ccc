@@ -33,49 +33,49 @@ import (
 	"github.com/go-playground/errors/v5"
 )
 
-const {{ Pluralize .Name }} accesstypes.Resource = "{{ Pluralize .Name }}"
+const {{ Pluralize .Resource.Name }} accesstypes.Resource = "{{ Pluralize .Resource.Name }}"
 
-func ({{ .Name }}) Resource() accesstypes.Resource {
-	return {{ Pluralize .Name }}
+func ({{ .Resource.Name }}) Resource() accesstypes.Resource {
+	return {{ Pluralize .Resource.Name }}
 }
 
-func ({{ .Name }}) DefaultConfig() resource.Config {
+func ({{ .Resource.Name }}) DefaultConfig() resource.Config {
 	return defaultConfig()
 }
 
-type {{ .Name }}Query struct {
-	qSet *resource.QuerySet[{{ .Name }}]
+type {{ .Resource.Name }}Query struct {
+	qSet *resource.QuerySet[{{ .Resource.Name }}]
 }
 
-func New{{ .Name }}Query() *{{ .Name }}Query {
-	return &{{ .Name }}Query{qSet: resource.NewQuerySet(resource.NewResourceMetadata[{{ .Name }}]())}
+func New{{ .Resource.Name }}Query() *{{ .Resource.Name }}Query {
+	return &{{ .Resource.Name }}Query{qSet: resource.NewQuerySet(resource.NewResourceMetadata[{{ .Resource.Name }}]())}
 }
 
-func New{{ .Name }}QueryFromQuerySet(qSet *resource.QuerySet[{{ .Name }}]) *{{ .Name }}Query {
-	return &{{ .Name }}Query{qSet: qSet}
+func New{{ .Resource.Name }}QueryFromQuerySet(qSet *resource.QuerySet[{{ .Resource.Name }}]) *{{ .Resource.Name }}Query {
+	return &{{ .Resource.Name }}Query{qSet: qSet}
 }
 
-{{ $TypeName := .Name}}
-{{ range .Fields }}
-{{ if eq .IsIndex true }}
-func (q *{{ $TypeName }}Query) Set{{ .Name }}(v {{ .Type }}) *{{ $TypeName }}Query {
-	q.qSet.SetKey("{{ .Name }}", v)
+{{ range $field := .Resource.Fields }}
+{{ if $field.IsIndex }}
+func (q *{{ $field.Parent.Name }}Query) Set{{ $field.Name }}(v {{ .GoType }}) *{{ $field.Parent.Name }}Query {
+	q.qSet.SetKey("{{ $field.Name }}", v)
 
 	return q
 }
 
-func (q *{{ $TypeName }}Query) {{ .Name }}() {{ .Type }} {
-	v, _ := q.qSet.Key("{{ .Name }}").({{ .Type }})
+func (q *{{ $field.Parent.Name }}Query) {{ $field.Name }}() {{ $field.GoType }} {
+	v, _ := q.qSet.Key("{{ $field.Name }}").({{ $field.GoType }})
 
 	return v
 }
 {{ end }}
 {{ end }}
 
-{{ if ne (len .SearchIndexes) 0 }}
-{{ range .SearchIndexes }}
-func (q *{{ $TypeName }}Query) SearchBy{{ .Name }}(v string) *{{ $TypeName }}Query {
-	searchSet := resource.NewSearchSet({{ ResourceSearchType .SearchType }}, "{{ .Name }}", v)
+{{ if ne (len .Resource.SearchIndexes) 0 }}
+{{ $resource := .Resource }}
+{{ range $searchIndex := .Resource.SearchIndexes }}
+func (q *{{ $resource.Name }}Query) SearchBy{{ $searchIndex.Name }}(v string) *{{ $resource.Name }}Query {
+	searchSet := resource.NewSearchSet({{ ResourceSearchType $searchIndex.SearchType }}, "{{ $searchIndex.Name }}", v)
 	q.qSet.SetSearchParam(searchSet)
 
 	return q
@@ -83,35 +83,35 @@ func (q *{{ $TypeName }}Query) SearchBy{{ .Name }}(v string) *{{ $TypeName }}Que
 {{ end }}
 {{ end }}
 
-func (q *{{ .Name }}Query) Query() *resource.QuerySet[{{ .Name }}] {
+func (q *{{ .Resource.Name }}Query) Query() *resource.QuerySet[{{ .Resource.Name }}] {
 	return q.qSet
 }
 
-func (q *{{ .Name }}Query) AddAllColumns() *{{ .Name }}Query {
-	{{- range .Fields }}
-	q.qSet.AddField("{{ .Name }}")
+func (q *{{ .Resource.Name }}Query) AddAllColumns() *{{ .Resource.Name }}Query {
+	{{- range $field := .Resource.Fields }}
+	q.qSet.AddField("{{ $field.Name }}")
 	{{- end }}
 
 	return q
 }
 
-{{ $TypeName := .Name}}
-{{ range .Fields }}
-func (q *{{ $TypeName }}Query) AddColumn{{ .Name }}() *{{ $TypeName }}Query {
-	q.qSet.AddField("{{ .Name }}")
+
+{{ range $field := .Resource.Fields }}
+func (q *{{ $field.Parent.Name }}Query) AddColumn{{ $field.Name }}() *{{ $field.Parent.Name }}Query {
+	q.qSet.AddField("{{ $field.Name }}")
 
 	return q
 }
 {{ end }}
 
-{{ if eq .IsView false }}
-type {{ .Name }}CreatePatch struct {
-	patchSet *resource.PatchSet[{{ .Name }}]
+{{ if eq .Resource.IsView false }}
+type {{ .Resource.Name }}CreatePatch struct {
+	patchSet *resource.PatchSet[{{ .Resource.Name }}]
 }
 
-{{ $PrimaryKeyIsUUID := PrimaryKeyTypeIsUUID .Fields }}
-{{ if and (eq .HasCompoundPrimaryKey false) (eq $PrimaryKeyIsUUID true) }}
-func New{{ .Name }}CreatePatchFromPatchSet(patchSet *resource.PatchSet[{{ .Name }}]) (*{{ .Name }}CreatePatch, error) {
+{{ $PrimaryKeyIsUUID := PrimaryKeyTypeIsUUID .Resource.Fields }}
+{{ if and (eq .Resource.HasCompoundPrimaryKey false) (eq $PrimaryKeyIsUUID true) }}
+func New{{ .Resource.Name }}CreatePatchFromPatchSet(patchSet *resource.PatchSet[{{ .Resource.Name }}]) (*{{ .Resource.Name }}CreatePatch, error) {
 	id, err := ccc.NewUUID()
 	if err != nil {
 		return nil, errors.Wrap(err, "ccc.NewUUID()")
@@ -121,122 +121,132 @@ func New{{ .Name }}CreatePatchFromPatchSet(patchSet *resource.PatchSet[{{ .Name 
 		SetKey("ID", id).
 		SetPatchType(resource.CreatePatchType)
 	
-	return &{{ .Name }}CreatePatch{patchSet: patchSet}, nil
+	return &{{ .Resource.Name }}CreatePatch{patchSet: patchSet}, nil
 }
 
-func New{{ .Name }}CreatePatch() (*{{ .Name }}CreatePatch, error) {
+func New{{ .Resource.Name }}CreatePatch() (*{{ .Resource.Name }}CreatePatch, error) {
 	id, err := ccc.NewUUID()
 	if err != nil {
 		return nil, errors.Wrap(err, "ccc.NewUUID()")
 	}
 	
-	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Name }}]()).
+	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Resource.Name }}]()).
 		SetKey("ID", id).
 		SetPatchType(resource.CreatePatchType)
 
-	return &{{ .Name }}CreatePatch{patchSet: patchSet}, nil
+	return &{{ .Resource.Name }}CreatePatch{patchSet: patchSet}, nil
 }
 {{ else }}
-func New{{ .Name }}CreatePatchFromPatchSet(
-{{- range $i, $e := .Fields }}{{ if eq .IsPrimaryKey true }}{{ GoCamel .Name }} {{ .Type }},{{ end }}{{ end }} patchSet *resource.PatchSet[{{ .Name }}]) *{{ .Name }}CreatePatch {
+func New{{ .Resource.Name }}CreatePatchFromPatchSet(
+{{- range $field := .Resource.Fields }}{{ if $field.IsPrimaryKey }}{{ GoCamel $field.Name }} {{ $field.GoType }},{{ end }}{{ end }} patchSet *resource.PatchSet[{{ .Resource.Name }}]) *{{ .Resource.Name }}CreatePatch {
 	patchSet.
-	{{ range .Fields }}
-	{{ if eq .IsPrimaryKey true }}
-	 	SetKey("{{ .Name }}", {{ GoCamel .Name }}).
+	{{ range $field := .Resource.Fields }}
+	{{ if $field.IsPrimaryKey }}
+	 	SetKey("{{ $field.Name }}", {{ GoCamel $field.Name }}).
 	{{ end }}
 	{{ end }}
 		SetPatchType(resource.CreatePatchType)
 	
-	return &{{ .Name }}CreatePatch{patchSet: patchSet}
+	return &{{ .Resource.Name }}CreatePatch{patchSet: patchSet}
 }
 
-func New{{ .Name }}CreatePatch(
-{{- range $i, $e := .Fields }}
-{{- if eq .IsPrimaryKey true }}{{- if $i }}, {{ end }}{{ GoCamel .Name }} {{ .Type }}{{ end }}{{ end }}) *{{ .Name }}CreatePatch {
-	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Name }}]()).
-	{{ range .Fields }}
-	{{ if eq .IsPrimaryKey true }}
-	 	SetKey("{{ .Name }}", {{ GoCamel .Name }}).
+func New{{ .Resource.Name }}CreatePatch(
+{{- range $isNotFirstIteration, $field := .Resource.Fields }}
+{{- if $field.IsPrimaryKey }}{{- if $isNotFirstIteration }}, {{ end }}{{ GoCamel $field.Name }} {{ $field.GoType }}{{ end }}{{ end }}) *{{ .Resource.Name }}CreatePatch {
+	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Resource.Name }}]()).
+	{{ range $field := .Resource.Fields }}
+	{{ if $field.IsPrimaryKey }}
+	 	SetKey("{{ $field.Name }}", {{ GoCamel $field.Name }}).
 	{{ end }}
 	{{ end }}
 		SetPatchType(resource.CreatePatchType)
 
-	return &{{ .Name }}CreatePatch{patchSet: patchSet}
+	return &{{ .Resource.Name }}CreatePatch{patchSet: patchSet}
 }
 {{ end }}
 
-func (p *{{ .Name }}CreatePatch) PatchSet() *resource.PatchSet[{{ .Name }}] {
+func (p *{{ .Resource.Name }}CreatePatch) PatchSet() *resource.PatchSet[{{ .Resource.Name }}] {
 	return p.patchSet
 }
 
 ` + fieldAccessors(CreatePatch) + `
 
-type {{ .Name }}UpdatePatch struct {
-	patchSet *resource.PatchSet[{{ .Name }}]
+type {{ .Resource.Name }}UpdatePatch struct {
+	patchSet *resource.PatchSet[{{ .Resource.Name }}]
 }
 
-func New{{ .Name }}UpdatePatchFromPatchSet(
-{{- range $i, $e := .Fields }}
-{{- if eq .IsPrimaryKey true }}{{ GoCamel .Name }} {{ .Type }},{{ end }}
-{{- end }}patchSet *resource.PatchSet[{{ .Name }}]) *{{ .Name }}UpdatePatch {
+func New{{ .Resource.Name }}UpdatePatchFromPatchSet(
+{{- range $field := .Resource.Fields -}}
+	{{- if $field.IsPrimaryKey -}}
+		{{- GoCamel $field.Name }} {{ $field.GoType }},
+	{{- end -}}
+{{- end -}}
+patchSet *resource.PatchSet[{{ .Resource.Name }}]) *{{ .Resource.Name }}UpdatePatch {
 	patchSet.
-	{{- range .Fields }}
-	{{- if eq .IsPrimaryKey true }}
-		SetKey("{{ .Name }}", {{ GoCamel .Name }}).
-	{{- end }}
-	{{- end }}
+	{{ range $field := .Resource.Fields }}
+		{{ if $field.IsPrimaryKey }}
+		SetKey("{{ $field.Name }}", {{ GoCamel $field.Name }}).
+		{{ end }}
+	{{ end }}
 		SetPatchType(resource.UpdatePatchType)
 	
-	return &{{ .Name }}UpdatePatch{patchSet: patchSet}
+	return &{{ .Resource.Name }}UpdatePatch{patchSet: patchSet}
 }
 
-func New{{ .Name }}UpdatePatch(
-{{- range $i, $e := .Fields }}
-{{- if eq .IsPrimaryKey true }}{{- if $i }}, {{ end }}{{ GoCamel .Name }} {{ .Type }}{{ end }}{{ end }}) *{{ .Name }}UpdatePatch {
-	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Name }}]()).
-	{{- range .Fields }}
-	{{- if eq .IsPrimaryKey true }}
-		SetKey("{{ .Name }}", {{ GoCamel .Name }}).
+func New{{ .Resource.Name }}UpdatePatch(
+{{- range $isNotFirstIteration, $field := .Resource.Fields -}}
+	{{- if $field.IsPrimaryKey }}
+		{{- if $isNotFirstIteration }}, {{ end -}}
+		{{- GoCamel $field.Name }} {{ $field.GoType -}}
+	{{- end -}}
+{{- end }}) *{{ .Resource.Name }}UpdatePatch {
+	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Resource.Name }}]()).
+{{- range $field := .Resource.Fields }}
+	{{- if $field.IsPrimaryKey }}
+		SetKey("{{ $field.Name }}", {{ GoCamel $field.Name }}).
 	{{- end }}
-	{{- end }}
+{{- end }}
 		SetPatchType(resource.UpdatePatchType)
 	
-	return &{{ .Name }}UpdatePatch{patchSet: patchSet}
+	return &{{ .Resource.Name }}UpdatePatch{patchSet: patchSet}
 }
 
-func (p *{{ .Name }}UpdatePatch) PatchSet() *resource.PatchSet[{{ .Name }}] {
+func (p *{{ .Resource.Name }}UpdatePatch) PatchSet() *resource.PatchSet[{{ .Resource.Name }}] {
 	return p.patchSet
 }
 
 ` + fieldAccessors(UpdatePatch) + `
 
-type {{ .Name }}DeletePatch struct {
-	patchSet *resource.PatchSet[{{ .Name }}]
+type {{ .Resource.Name }}DeletePatch struct {
+	patchSet *resource.PatchSet[{{ .Resource.Name }}]
 }
 
-func New{{ .Name }}DeletePatch(
-{{- range $i, $e := .Fields }}
-{{- if eq .IsPrimaryKey true }}{{- if $i }}, {{ end }}{{ GoCamel .Name }} {{ .Type}}{{ end }}{{ end }}) *{{ .Name }}DeletePatch {
-	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Name }}]()).
-	{{- range .Fields }}
-	{{- if eq .IsPrimaryKey true }}
-		SetKey("{{ .Name }}", {{ GoCamel .Name }}).
-	{{- end }}
-	{{- end }}
+func New{{ .Resource.Name }}DeletePatch(
+{{- range $isNotFirstIteration, $field := .Resource.Fields }}
+	{{- if $field.IsPrimaryKey -}}
+		{{- if $isNotFirstIteration }}, {{ end -}}
+		{{- GoCamel $field.Name }} {{ $field.GoType -}}
+	{{- end -}}
+{{- end }}) *{{ .Resource.Name }}DeletePatch {
+	patchSet := resource.NewPatchSet(resource.NewResourceMetadata[{{ .Resource.Name }}]()).
+{{- range $field := .Resource.Fields }}
+		{{- if $field.IsPrimaryKey }}
+		SetKey("{{ $field.Name }}", {{ GoCamel $field.Name }}).
+		{{- end }}
+{{- end }}
 		SetPatchType(resource.DeletePatchType)
 	
-	return &{{ .Name }}DeletePatch{patchSet: patchSet}
+	return &{{ .Resource.Name }}DeletePatch{patchSet: patchSet}
 }
 
-func (p *{{ .Name }}DeletePatch) PatchSet() *resource.PatchSet[{{ .Name }}] {
+func (p *{{ .Resource.Name }}DeletePatch) PatchSet() *resource.PatchSet[{{ .Resource.Name }}] {
 	return p.patchSet
 }
 
-{{ $TypeName := .Name}}
-{{ range .Fields }}
-{{ if eq .IsPrimaryKey true }} 
-func (p *{{ $TypeName }}DeletePatch) {{ .Name }}() {{ .Type }} {
-	v, _ := p.patchSet.Key("{{ .Name }}").({{ .Type }}) 
+{{ range $field := .Resource.Fields }}
+{{ if $field.IsPrimaryKey }} 
+func (p *{{ $field.Parent.Name }}DeletePatch) {{ $field.Name }}() {{ $field.GoType }} {
+	v, _ := p.patchSet.Key("{{ $field.Name }}").({{ $field.GoType }}) 
 
 	return v
 }
@@ -253,19 +263,19 @@ package app
 
 {{ .Handlers }}`
 
-	listTemplate = `func (a *App) {{ Pluralize .Type.Name }}() http.HandlerFunc {
-	{{ $StructName := Pluralize .Type.Name -}}
-	type {{ GoCamel .Type.Name }} struct {
-		{{ range .Type.Fields }}{{ .Name }} {{ .Type }} ` + "`json:\"{{ DetermineJSONTag . false }}\"{{ if eq .IsIndex true }}index:\"true\"{{end}}{{ FormatPerm .ListPerm }}{{ FormatQueryTag .QueryTag }}{{ FormatTokenTag $StructName .SpannerColumn }}`" + `
-		{{ end }}
+	listTemplate = `func (a *App) {{ Pluralize .Resource.Name }}() http.HandlerFunc {
+	type {{ GoCamel .Resource.Name }} struct {
+		{{- range $field := .Resource.Fields }}
+		{{ $field.Name }} {{ $field.GoType}} ` + "`{{ $field.JSONTag }} {{ $field.IndexTag}} {{ $field.ListPermTag }} {{ $field.QueryTag }} {{FormatTokenTag (Pluralize $field.Parent.Name) $field.SpannerName}}`" + `
+		{{- end }}
 	}
 
-	type response []*{{ GoCamel .Type.Name }}
+	type response []*{{ GoCamel .Resource.Name }}
 
-	decoder := NewQueryDecoder[resources.{{ .Type.Name }}, {{ GoCamel .Type.Name }}](a, accesstypes.List)
+	decoder := NewQueryDecoder[resources.{{ .Resource.Name }}, {{ GoCamel .Resource.Name }}](a, accesstypes.List)
 
 	return httpio.Log(func(w http.ResponseWriter, r *http.Request) error {
-		ctx, span := otel.Tracer(name).Start(r.Context(), "App.{{ Pluralize .Type.Name }}()")
+		ctx, span := otel.Tracer(name).Start(r.Context(), "App.{{ Pluralize .Resource.Name }}()")
 		defer span.End()
 
 		querySet, err := decoder.Decode(r)
@@ -273,41 +283,41 @@ package app
 			return httpio.NewEncoder(w).ClientMessage(ctx, err)
 		}
 
-		rows, err := spanner.List(ctx, a.businessLayer.DB(), resources.New{{ .Type.Name }}QueryFromQuerySet(querySet))
+		rows, err := spanner.List(ctx, a.businessLayer.DB(), resources.New{{ .Resource.Name }}QueryFromQuerySet(querySet))
 		if err != nil {
 			return httpio.NewEncoder(w).ClientMessage(ctx, err)
 		}
 
 		resp := make(response, 0, len(rows))
 		for _, r := range rows {
-			resp = append(resp, (*{{ GoCamel .Type.Name }})(r))
+			resp = append(resp, (*{{ GoCamel .Resource.Name }})(r))
 		}
 
 		return httpio.NewEncoder(w).Ok(resp)
 	})
 }`
 
-	readTemplate = `func (a *App) {{ .Type.Name }}() http.HandlerFunc {
-	{{ $StructName := Pluralize .Type.Name -}}
+	readTemplate = `func (a *App) {{ .Resource.Name }}() http.HandlerFunc {
 	type response struct {
-		{{ range .Type.Fields }}{{ .Name }} {{ .Type }} ` + "`json:\"{{ DetermineJSONTag . false }}\"{{ if eq .IsUniqueIndex true }}index:\"true\"{{end}}{{ FormatPerm .ReadPerm }}{{ FormatQueryTag .QueryTag }}{{ FormatTokenTag $StructName .SpannerColumn }}`" + `
-		{{ end }}
+		{{- range $field := .Resource.Fields }}
+		{{ $field.Name }} {{ $field.GoType}} ` + "`{{ $field.JSONTag }} {{ $field.UniqueIndexTag }} {{ $field.ReadPermTag }} {{ $field.QueryTag }} {{ FormatTokenTag (Pluralize $field.Parent.Name) $field.SpannerName }}`" + `
+		{{- end }}
 	}
 
-	decoder := NewQueryDecoder[resources.{{ .Type.Name }}, response](a, accesstypes.Read)
+	decoder := NewQueryDecoder[resources.{{ .Resource.Name }}, response](a, accesstypes.Read)
 
 	return httpio.Log(func(w http.ResponseWriter, r *http.Request) error {
-		ctx, span := otel.Tracer(name).Start(r.Context(), "App.{{ .Type.Name }}()")
+		ctx, span := otel.Tracer(name).Start(r.Context(), "App.{{ .Resource.Name }}()")
 		defer span.End()
 
-		id := httpio.Param[{{ PrimaryKeyType .Type.Fields }}](r, router.{{ .Type.Name }}ID)
+		id := httpio.Param[{{ PrimaryKeyType .Resource.Fields }}](r, router.{{ .Resource.Name }}ID)
 
 		querySet, err := decoder.Decode(r)
 		if err != nil {
 			return httpio.NewEncoder(w).ClientMessage(ctx, err)
 		}
 
-		row, err := spanner.Read(ctx, a.businessLayer.DB(), resources.New{{ .Type.Name }}QueryFromQuerySet(querySet).SetID(id))
+		row, err := spanner.Read(ctx, a.businessLayer.DB(), resources.New{{ .Resource.Name }}QueryFromQuerySet(querySet).SetID(id))
 		if err != nil {
 			return httpio.NewEncoder(w).ClientMessage(ctx, err)
 		}
@@ -316,31 +326,32 @@ package app
 	})
 }`
 
-	patchTemplate = `func (a *App) Patch{{ Pluralize .Type.Name }}() http.HandlerFunc {
+	patchTemplate = `func (a *App) Patch{{ Pluralize .Resource.Name }}() http.HandlerFunc {
 	type request struct {
-		{{ range .Type.Fields }}{{ .Name }} {{ .Type }} ` + "`json:\"{{ DetermineJSONTag . true }}\"{{ FormatPerm .PatchPerm }}{{ FormatQueryTag .QueryTag }}`" + `
-		{{ end }}
+		{{- range $field := .Resource.Fields }}
+		{{ $field.Name }} {{ $field.GoType}} ` + "`{{ $field.JSONTagForPatch }} {{ $field.PatchPermTag }} {{ $field.QueryTag }}`" + `
+		{{- end }}
 	}
 	
-	{{ $PrimaryKeyType := PrimaryKeyType .Type.Fields }}
+	{{ $PrimaryKeyType := PrimaryKeyType .Resource.Fields }}
 	{{- if eq $PrimaryKeyType "ccc.UUID"  }}
 	type response struct {
 		IDs []ccc.UUID ` + "`json:\"iDs\"`" + `
 	}
 	{{- end }}
 
-	decoder := NewDecoder[resources.{{ .Type.Name }}, request](a, accesstypes.Create, accesstypes.Update, accesstypes.Delete)
+	decoder := NewDecoder[resources.{{ .Resource.Name }}, request](a, accesstypes.Create, accesstypes.Update, accesstypes.Delete)
 
 	return httpio.Log(func(w http.ResponseWriter, r *http.Request) error {
-		ctx, span := otel.Tracer(name).Start(r.Context(), "App.Patch{{ Pluralize .Type.Name }}()")
+		ctx, span := otel.Tracer(name).Start(r.Context(), "App.Patch{{ Pluralize .Resource.Name }}()")
 		defer span.End()
 
 		var patches []resource.SpannerBufferer
-		{{- if eq $PrimaryKeyType "ccc.UUID"  }}
+		{{- if eq $PrimaryKeyType "ccc.UUID" }}
 		var resp response
 		{{- end }}
 
-		for op, err := range resource.Operations(r, "/{id}"{{- if ne $PrimaryKeyType "ccc.UUID"  }}, resource.RequireCreatePath(){{- end }}) {
+		for op, err := range resource.Operations(r, "/{id}"{{- if ne $PrimaryKeyType "ccc.UUID" }}, resource.RequireCreatePath(){{- end }}) {
 			if err != nil {
 				return httpio.NewEncoder(w).ClientMessage(ctx, err)
 			}
@@ -353,7 +364,7 @@ package app
 			switch op.Type {
 			case resource.OperationCreate:
 				{{- if eq $PrimaryKeyType "ccc.UUID" }}
-				patch, err := resources.New{{ .Type.Name }}CreatePatchFromPatchSet(patchSet)
+				patch, err := resources.New{{ .Resource.Name }}CreatePatchFromPatchSet(patchSet)
 				if err != nil {
 					return httpio.NewEncoder(w).ClientMessage(ctx, err)
 				}
@@ -361,19 +372,19 @@ package app
 				resp.IDs = append(resp.IDs, patch.ID())
 				{{- else }}
 				id := httpio.Param[{{ $PrimaryKeyType }}](op.Req, "id")
-				patches = append(patches, resources.New{{ .Type.Name }}CreatePatchFromPatchSet(id, patchSet).PatchSet())
+				patches = append(patches, resources.New{{ .Resource.Name }}CreatePatchFromPatchSet(id, patchSet).PatchSet())
 				{{- end }}
 			case resource.OperationUpdate:
 				id := httpio.Param[{{ $PrimaryKeyType }}](op.Req, "id")
-				patches = append(patches, resources.New{{ .Type.Name }}UpdatePatchFromPatchSet(id, patchSet).PatchSet())
+				patches = append(patches, resources.New{{ .Resource.Name }}UpdatePatchFromPatchSet(id, patchSet).PatchSet())
 			case resource.OperationDelete:
 				id := httpio.Param[{{ $PrimaryKeyType }}](op.Req, "id")
-				patches = append(patches, resources.New{{ .Type.Name }}DeletePatch(id).PatchSet())
+				patches = append(patches, resources.New{{ .Resource.Name }}DeletePatch(id).PatchSet())
 			}
 		}
 
 		if err := a.businessLayer.DB().Patch(ctx, resource.UserEvent(ctx), patches...); err != nil {
-			return httpio.NewEncoder(w).ClientMessage(ctx, spanner.HandleError[resources.{{ .Type.Name }}](err))
+			return httpio.NewEncoder(w).ClientMessage(ctx, spanner.HandleError[resources.{{ .Resource.Name }}](err))
 		}
 
 		{{ if eq $PrimaryKeyType "ccc.UUID"  }}
@@ -396,8 +407,8 @@ package app
 	func TestClient_Resources(t *testing.T) {
 		t.Parallel()
 
-		{{ range .Types }}
-		RunResourceTestsFor[resources.{{ .Name }}](t)
+		{{ range $resource := .Resources }}
+		RunResourceTestsFor[resources.{{ $resource.Name }}](t)
 		{{- end }}
 	}`
 
@@ -466,7 +477,7 @@ import { Resources } from './resourcePermissions';
 {{ range $resource := $resources }}
 export interface {{ Pluralize $resource.Name }} {
 {{- range $field := $resource.Fields }}
-  {{ Camel $field.Name }}: {{ $field.DataType }};
+  {{ Camel $field.Name }}: {{ $field.TypescriptDataType }};
 {{- end }}
 }
 {{ end }}
@@ -476,7 +487,8 @@ const resourceMap: ResourceMap = {
     route: '{{ Kebab (Pluralize $resource.Name) }}',
     fields: [
       {{- range $field := $resource.Fields }}
-      { fieldName: '{{ Camel $field.Name }}', {{- if $field.IsPrimaryKey }} primaryKey: { ordinalPosition: {{ $field.KeyOrdinalPosition }} },{{- end }} displayType: '{{ Lower $field.DisplayType }}', required: {{ $field.Required }}{{ if $field.IsForeignKey }}, enumeratedResource: Resources.{{ $field.ReferencedResource }}{{ end }} },
+      { fieldName: '{{ Camel $field.Name }}', {{- if $field.IsPrimaryKey }} primaryKey: { ordinalPosition: {{ $field.KeyOrdinalPosition }} }, {{- end }} displayType: '{{ Lower $field.TypescriptDisplayType }}', required: {{ $field.Required -}}
+	  {{- if $field.IsEnumerated }}, enumeratedResource: Resources.{{ $field.ReferencedResource }}{{ end }} },
       {{- end }}
     ],
   },
@@ -558,29 +570,29 @@ export function resourceMeta(resource: Resource): ResourceMeta {
 )
 
 func fieldAccessors(patchType PatchType) string {
-	return fmt.Sprintf(`{{ $TypeName := .Name}}
-		{{ range .Fields }}
-		{{ if eq .IsPrimaryKey false }}
-		func (p *{{ $TypeName }}%[1]sPatch) Set{{ .Name }}(v {{ .Type }}) *{{ $TypeName }}%[1]sPatch {
-			p.patchSet.Set("{{ .Name }}", v)
+	return fmt.Sprintf(`
+		{{- range $field := .Resource.Fields }}
+		{{ if eq false $field.IsPrimaryKey }}
+		func (p *{{ $field.Parent.Name }}%[1]sPatch) Set{{ $field.Name }}(v {{ $field.GoType }}) *{{ $field.Parent.Name }}%[1]sPatch {
+			p.patchSet.Set("{{ $field.Name }}", v)
 
 			return p
 		}
 		{{ end }}
 
-		func (p *{{ $TypeName }}%[1]sPatch) {{ .Name }}() {{ .Type }} {
-		{{ if eq .IsPrimaryKey true -}} 
-			v, _ := p.patchSet.Key("{{ .Name }}").({{ .Type }})
+		func (p *{{ $field.Parent.Name }}%[1]sPatch) {{ $field.Name }}() {{ $field.GoType }} {
+		{{ if $field.IsPrimaryKey -}} 
+			v, _ := p.patchSet.Key("{{ $field.Name }}").({{ $field.GoType}})
 		{{ else -}} 
-			v, _ := p.patchSet.Get("{{ .Name }}").({{ .Type }}) 
+			v, _ := p.patchSet.Get("{{ $field.Name }}").({{ $field.GoType}}) 
 		{{ end }}
 
 			return v
 		}
 
-		{{ if eq .IsPrimaryKey false }}
-		func (p *{{ $TypeName }}%[1]sPatch) {{ .Name }}IsSet() bool {
-			return p.patchSet.IsSet("{{ .Name }}")
+		{{ if eq false $field.IsPrimaryKey  }}
+		func (p *{{ $field.Parent.Name }}%[1]sPatch) {{ $field.Name }}IsSet() bool {
+			return p.patchSet.IsSet("{{ $field.Name }}")
 		}
 		{{ end }}
 		{{ end }}`, string(patchType))

@@ -3,21 +3,13 @@ package generation
 import (
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/cccteam/ccc/resource"
-)
 
-var baseTypes = []string{
-	"bool",
-	"string",
-	"int", "int8", "int16", "int32", "int64",
-	"float32", "float64",
-	"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
-	"byte",
-	"rune",
-	"complex64", "complex128",
-	"error",
-}
+	"github.com/ettle/strcase"
+)
 
 var tokenizeRegex = regexp.MustCompile(`(TOKENIZE_[^)]+)\(([^)]+)\)`)
 
@@ -82,52 +74,9 @@ const (
 	routerTestName              = "routes_test"
 )
 
-type generatedType struct {
-	Name                  string
-	IsView                bool
-	HasCompoundPrimaryKey bool
-	Fields                []*typeField
-	SearchIndexes         []*searchIndex
-}
-
-type typeField struct {
-	Name            string
-	Type            string
-	Tag             string
-	IsPrimaryKey    bool
-	IsIndex         bool
-	IsUniqueIndex   bool
-	ConstraintTypes []ConstraintType
-	fieldTagInfo
-}
-
-type fieldTagInfo struct {
-	QueryTag      string
-	ReadPerm      string
-	ListPerm      string
-	PatchPerm     string
-	Conditions    []string
-	SpannerColumn string
-}
-
 type searchIndex struct {
 	Name       string
 	SearchType string
-}
-
-type FieldMetadata struct {
-	ColumnName         string
-	ConstraintTypes    []ConstraintType
-	IsPrimaryKey       bool
-	IsForeignKey       bool
-	SpannerType        string
-	IsNullable         bool
-	IsIndex            bool
-	IsUniqueIndex      bool
-	OrdinalPosition    int64
-	KeyOrdinalPosition int64
-	ReferencedTable    string
-	ReferencedColumn   string
 }
 
 type InformationSchemaResult struct {
@@ -149,9 +98,25 @@ type InformationSchemaResult struct {
 }
 
 type TableMetadata struct {
-	Columns       map[string]FieldMetadata
+	Columns       map[string]ColumnMeta
 	SearchIndexes map[string][]*expressionField
 	IsView        bool
+	PkCount       int
+}
+
+type ColumnMeta struct {
+	ColumnName         string
+	ConstraintTypes    []ConstraintType
+	IsPrimaryKey       bool
+	IsForeignKey       bool
+	SpannerType        string
+	IsNullable         bool
+	IsIndex            bool
+	IsUniqueIndex      bool
+	OrdinalPosition    int64
+	KeyOrdinalPosition int64
+	ReferencedTable    string
+	ReferencedColumn   string
 }
 
 type generationOption struct {
@@ -170,62 +135,153 @@ type generatedRoute struct {
 	HandlerFunc string
 }
 
-type tsType int
-
-const (
-	link tsType = iota
-	uuid
-	boolean
-	str
-	number
-	date
-	enumerated
-)
-
-func (t tsType) String() string {
-	switch t {
-	case link:
-		return "Link"
-	case uuid:
-		return "uuid"
-	case boolean:
-		return "boolean"
-	case str:
-		return "string"
-	case number:
-		return "number"
-	case date:
-		return "Date"
-	case enumerated:
-		return "enumerated"
-	}
-
-	return "string"
+type ResourceInfo struct {
+	Name                  string
+	Fields                []*FieldInfo
+	searchIndexes         map[string][]*expressionField // Search Indexes are hidden columns in Spanner that are not present in Go struct definitions
+	IsView                bool                          // Determines how CreatePatch is rendered in resource generation.
+	HasCompoundPrimaryKey bool                          // Determines how CreatePatchSet is rendered in resource generation.
 }
 
-type generatedResource struct {
+func (r *ResourceInfo) SearchIndexes() []*searchIndex {
+	typeIndexMap := make(map[resource.SearchType]string)
+	for searchIndex, expressionFields := range r.searchIndexes {
+		for _, exprField := range expressionFields {
+			typeIndexMap[exprField.tokenType] = searchIndex
+		}
+	}
+
+	var indexes []*searchIndex
+	for tokenType, indexName := range typeIndexMap {
+		indexes = append(indexes, &searchIndex{
+			Name:       indexName,
+			SearchType: string(tokenType),
+		})
+	}
+
+	return indexes
+}
+
+type FieldInfo struct {
+	Parent             *ResourceInfo
 	Name               string
-	Fields             []*generatedResource
-	dataType           tsType
+	SpannerName        string
+	GoType             string
+	typescriptType     string
+	query              string   //
+	Conditions         []string // Contains auxiliary tags like `immutable`. Determines JSON tag in handler generation.
+	permissions        []string
 	Required           bool
 	IsPrimaryKey       bool
 	IsForeignKey       bool
-	OrdinalPosition    int64
-	KeyOrdinalPosition int64
+	IsIndex            bool
+	IsUniqueIndex      bool
+	OrdinalPosition    int64 // Position of column in the table definition
+	KeyOrdinalPosition int64 // Position of primary or foreign key in a compound key definition
+	IsEnumerated       bool
 	ReferencedResource string
-	ReferencedColumn   string
+	ReferencedField    string
 }
 
-func (r generatedResource) DataType() string {
-	if r.dataType == uuid || r.dataType == enumerated {
-		return str.String()
+func (f *FieldInfo) TypescriptDataType() string {
+	if f.typescriptType == "uuid" {
+		return "string"
 	}
 
-	return r.dataType.String()
+	return f.typescriptType
 }
 
-func (r generatedResource) DisplayType() string {
-	return r.dataType.String()
+func (f *FieldInfo) TypescriptDisplayType() string {
+	if f.IsEnumerated {
+		return "enumerated"
+	}
+
+	return f.typescriptType
+}
+
+func (f *FieldInfo) JSONTag() string {
+	caser := strcase.NewCaser(false, nil, nil)
+	camelCaseName := caser.ToCamel(f.Name)
+
+	if !f.IsPrimaryKey {
+		return fmt.Sprintf("json:%q", camelCaseName+",omitempty")
+	}
+
+	return fmt.Sprintf("json:%q", camelCaseName)
+}
+
+func (f *FieldInfo) JSONTagForPatch() string {
+	if f.IsPrimaryKey || f.IsImmutable() {
+		return fmt.Sprintf("json:%q", "-")
+	}
+
+	caser := strcase.NewCaser(false, nil, nil)
+	camelCaseName := caser.ToCamel(f.Name)
+
+	return fmt.Sprintf("json:%q", camelCaseName)
+}
+
+func (f *FieldInfo) IndexTag() string {
+	if f.IsIndex {
+		return `index:"true"`
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) UniqueIndexTag() string {
+	if f.IsUniqueIndex {
+		return `index:"true"`
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) IsImmutable() bool {
+	return slices.Contains(f.Conditions, "immutable")
+}
+
+func (f *FieldInfo) QueryTag() string {
+	if f.query != "" {
+		return fmt.Sprintf("query:%q", f.query)
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) ReadPermTag() string {
+	if slices.Contains(f.permissions, "Read") {
+		return fmt.Sprintf("perm:%q", "Read")
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) ListPermTag() string {
+	if slices.Contains(f.permissions, "List") {
+		return fmt.Sprintf("perm:%q", "List")
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) PatchPermTag() string {
+	var patches []string
+	for _, perm := range f.permissions {
+		if perm != "Read" && perm != "List" {
+			patches = append(patches, perm)
+		}
+	}
+
+	if len(patches) != 0 {
+		return fmt.Sprintf("perm:%q", strings.Join(patches, ","))
+	}
+
+	return ""
+}
+
+func (f *FieldInfo) IsView() bool {
+	return f.Parent.IsView
 }
 
 type expressionField struct {
