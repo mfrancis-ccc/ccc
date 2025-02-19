@@ -2,8 +2,8 @@
 package main
 
 import (
-	"github.com/cccteam/ccc/lint/errwrap"
-	"github.com/cccteam/ccc/lint/otelspanname"
+	"github.com/mfrancis-ccc/ccc/lint/errwrap"
+	"github.com/mfrancis-ccc/ccc/lint/otelspanname"
 	"golang.org/x/tools/go/analysis"
 )
 
